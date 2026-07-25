@@ -260,17 +260,21 @@ def build_auditor_agent() -> LlmAgent:
 # Terminal branch agents
 # --------------------------------------------------------------------------- #
 class HumanQueueAgent(BaseAgent):
-    """ESCALATE branch — writes to `pending_review` with the auditor's
-    uncertainty surfaced, so a reviewer sees the doubt, not just the case."""
+    """ESCALATE branch — flags the case for human review.
+
+    Records only the *intent* in session state. The `pending_review` row itself
+    is written by the pipeline AFTER the challan row is saved, because
+    `pending_review` has a foreign key to `challans` and the challan is
+    persisted only once the whole agent tree has finished. Writing here — mid
+    tree, before the challan exists — violates that constraint and fails the
+    whole live audit. The pipeline owns the persistence and its ordering.
+    """
 
     async def _run_async_impl(
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
-        from .. import db
-
         state = ctx.session.state
         verdict = _as_dict(state.get("verdict"))
-        challan_id = state.get("challan_id", "")
         checks = verdict.get("checks", {}) or {}
         failed = [k for k, v in checks.items() if v is False and k != "duplicate"]
 
@@ -278,12 +282,7 @@ class HumanQueueAgent(BaseAgent):
         if failed:
             uncertainty += f"\n\nUnresolved checks: {', '.join(failed)}."
 
-        review_id = db.enqueue_review(
-            challan_id=challan_id,
-            uncertainty=uncertainty,
-            trust_score=float(verdict.get("trust_score", 0.0)),
-        )
-        delta = {"review_id": review_id, "queued_for_human": True}
+        delta = {"queued_for_human": True, "review_uncertainty": uncertainty}
         state.update(delta)
 
         yield Event(
@@ -293,7 +292,7 @@ class HumanQueueAgent(BaseAgent):
             actions=EventActions(state_delta=delta),
             content=types.Content(
                 role="model",
-                parts=[types.Part(text=f"Queued for human review as {review_id}.")],
+                parts=[types.Part(text="Flagged for human review.")],
             ),
         )
 
