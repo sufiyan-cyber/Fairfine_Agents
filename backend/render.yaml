@@ -1,0 +1,37 @@
+# Render blueprint for the FairFine backend.
+# Render reads this automatically when you create a "Blueprint" from the repo.
+# It builds the Dockerfile in this folder — no Docker needed on your machine.
+services:
+  - type: web
+    name: fairfine-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    rootDir: backend
+    plan: free
+    region: singapore # closest Render region to India
+    healthCheckPath: /api/health
+    # A single instance: the SQLite hash chain serialises through an in-process
+    # lock, so two instances would keep two conflicting chains.
+    numInstances: 1
+    envVars:
+      # Secrets are NOT committed here — sync:false makes Render prompt you for
+      # them once in the dashboard on first deploy.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      # Non-secret config, set directly.
+      - key: AUDITOR_MODEL
+        value: gemini-2.5-flash
+      - key: CITIZEN_MODEL
+        value: gemini-2.5-flash
+      - key: FRAMES_PER_EVENT
+        value: "3"
+      - key: QDRANT_COLLECTION
+        value: fairfine
+      # Set to your Vercel URL after the frontend is live (see RUNBOOK).
+      - key: CORS_ORIGINS
+        value: "*"

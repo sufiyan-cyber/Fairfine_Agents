@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.db-wal
+*.db-shm
+.env
+env.yaml
+*.env.yaml
+diag*.out
+uploads/
+data/seed_frames/
+data/demo_clips/
+.pytest_cache/

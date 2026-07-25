@@ -1,0 +1,117 @@
+"""Runtime configuration for FairFine.
+
+Every external dependency (Gemini, Qdrant, Enkrypt) is optional. When a key is
+absent the corresponding subsystem falls back to a deterministic local
+implementation so the full pipeline still runs end-to-end. `Settings.mode`
+reports which posture we are in so the UI can label it honestly.
+"""
+
+from __future__ import annotations
+
+import os
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BACKEND_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = BACKEND_ROOT / "data"
+UPLOAD_DIR = BACKEND_ROOT / "uploads"
+FRAME_DIR = UPLOAD_DIR / "frames"
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=(BACKEND_ROOT / ".env"), env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # --- Models (detection stack is locked by the PRD) ---
+    gemini_api_key: str = ""
+    detector_model: str = "gemini-2.5-flash"
+    plate_model: str = "gemini-2.5-flash"
+    auditor_model: str = "gemini-2.5-pro"
+    citizen_model: str = "gemini-2.5-pro"
+
+    # --- Semantic memory ---
+    qdrant_url: str = ""
+    qdrant_api_key: str = ""
+    qdrant_collection: str = "fairfine"
+
+    # --- Guardrails ---
+    enkrypt_api_key: str = ""
+    enkrypt_base_url: str = "https://api.enkryptai.com"
+
+    # --- Storage ---
+    database_url: str = f"sqlite:///{(BACKEND_ROOT / 'fairfine.db').as_posix()}"
+
+    # --- Pipeline tuning (mirrors the auditor's verdict rules) ---
+    event_window_seconds: int = 3
+    frames_per_event: int = 5
+    plate_confidence_floor: float = 0.85
+    issue_trust_threshold: float = 0.90
+    escalate_trust_floor: float = 0.60
+    duplicate_window_seconds: int = 60
+
+    cors_origins: str = "*"
+
+    @property
+    def sqlite_path(self) -> Path:
+        raw = self.database_url.replace("sqlite:///", "").replace("sqlite://", "")
+        return Path(raw)
+
+    @property
+    def live_llm(self) -> bool:
+        return bool(self.gemini_api_key.strip())
+
+    @property
+    def live_qdrant(self) -> bool:
+        return bool(self.qdrant_url.strip())
+
+    @property
+    def live_enkrypt(self) -> bool:
+        return bool(self.enkrypt_api_key.strip())
+
+    @property
+    def mode(self) -> str:
+        """`live` when Gemini is wired up, `simulation` otherwise."""
+        return "live" if self.live_llm else "simulation"
+
+    def capability_report(self) -> dict[str, str]:
+        def label(is_live: bool, live_name: str, fallback_name: str) -> str:
+            return live_name if is_live else fallback_name
+
+        return {
+            "inference": label(self.live_llm, "gemini", "deterministic-simulator"),
+            "memory": label(self.live_qdrant, "qdrant", "sqlite-vector-fallback"),
+            "guardrails": label(self.live_enkrypt, "enkrypt-ai", "local-pii-redactor"),
+            "ledger": "sqlite-hash-chain",
+        }
+
+
+@lru_cache
+def get_settings() -> Settings:
+    settings = Settings()
+    for directory in (DATA_DIR, UPLOAD_DIR, FRAME_DIR):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    # Bridge the Gemini key into the process environment.
+    #
+    # We read the key from .env via pydantic-settings and pass it explicitly to
+    # our own `genai.Client(...)` calls. But an ADK `LlmAgent` builds its *own*
+    # Gemini client internally, and that client reads the key from the
+    # environment (GOOGLE_API_KEY / GEMINI_API_KEY) — which pydantic-settings
+    # does NOT populate. Without this, every LlmAgent fails with "No API key was
+    # provided" even though the key is configured. Export the resolved value so
+    # the ADK path and our direct path use exactly the same key.
+    if settings.gemini_api_key:
+        os.environ["GOOGLE_API_KEY"] = settings.gemini_api_key
+        os.environ["GEMINI_API_KEY"] = settings.gemini_api_key
+        # Force the Gemini Developer API backend, not Vertex, so a stray
+        # GOOGLE_GENAI_USE_VERTEXAI in the shell can't redirect ADK to an auth
+        # path this key won't satisfy.
+        os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "false")
+
+    return settings
+
+
+settings = get_settings()

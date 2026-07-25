@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Databases + generated artefacts
+*.db
+*.db-wal
+*.db-shm
+backend/uploads/
+backend/data/seed_frames/
+backend/data/demo_clips/
+
+# Secrets — never commit a populated .env
+.env
+.env.local
+.env*.local
+!.env.example
+
+# Cloud Run deploy secrets file (holds real API keys)
+env.yaml
+*.env.yaml
+!env.yaml.example
+
+# Node / Next
+node_modules/
+.next/
+out/
+.vercel/
+next-env.d.ts
+.turbo/
+
+# Editors + OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+.claude/

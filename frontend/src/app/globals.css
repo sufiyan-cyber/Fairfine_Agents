@@ -1,0 +1,207 @@
+@import "tailwindcss";
+
+/* ==========================================================================
+   FairFine design tokens — Dark OLED operations console.
+
+   Committed to a single dark theme. This is a 24/7 enforcement console and a
+   notice a citizen may open at night; a low-emission surface is the correct
+   default rather than a user preference.
+
+   Verdict colour carries meaning from the CITIZEN's side of the transaction:
+     good   (green)  REJECT   — no fine. A wrongful charge was prevented.
+     warn   (amber)  ESCALATE — held for a human. Nothing charged yet.
+     danger (red)    ISSUE    — money is being taken from someone.
+   Every verdict is always labelled in text as well as colour.
+   ========================================================================== */
+
+@theme {
+  /* Surfaces — near-black base, layered panels */
+  --color-void: #08090c;
+  --color-panel: #0f1116;
+  --color-panel-2: #161922;
+  --color-panel-3: #1d212c;
+  --color-edge: #232733;
+  --color-edge-strong: #333a4b;
+
+  /* Text — all pairs verified ≥4.5:1 on --color-void and --color-panel */
+  --color-ink: #e9ebf1;
+  --color-ink-dim: #9ca4b6;
+  --color-ink-faint: #767e92;
+
+  /* Semantic */
+  --color-signal: #4d8dff;
+  --color-signal-dim: #2b5db8;
+  --color-good: #3ecf8e;
+  --color-warn: #f0a93b;
+  --color-danger: #ff5c63;
+
+  --font-sans: var(--font-plex), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, monospace;
+}
+
+/* --------------------------------------------------------------------------
+   Base
+   -------------------------------------------------------------------------- */
+html {
+  color-scheme: dark;
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+body {
+  background-color: var(--color-void);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Ambient field — a faint signal grid behind everything. Never competes
+   with data. */
+.ff-field {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(ellipse 80% 55% at 50% -10%, rgba(77, 141, 255, 0.11), transparent 70%),
+    linear-gradient(rgba(255, 255, 255, 0.016) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.016) 1px, transparent 1px);
+  background-size: 100% 100%, 56px 56px, 56px 56px;
+}
+
+/* --------------------------------------------------------------------------
+   Focus — visible, consistent, never removed
+   -------------------------------------------------------------------------- */
+:focus-visible {
+  outline: 2px solid var(--color-signal);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* --------------------------------------------------------------------------
+   Scrollbars
+   -------------------------------------------------------------------------- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-edge-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-edge-strong);
+  border-radius: 99px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #414a60;
+}
+
+/* --------------------------------------------------------------------------
+   Numerics — tabular figures wherever a number can change in place, so trust
+   scores and hashes never shift the layout as they update.
+   -------------------------------------------------------------------------- */
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* --------------------------------------------------------------------------
+   Motion
+   -------------------------------------------------------------------------- */
+@keyframes ff-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes ff-pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(77, 141, 255, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 9px rgba(77, 141, 255, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(77, 141, 255, 0);
+  }
+}
+
+@keyframes ff-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes ff-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.animate-fade-up {
+  animation: ff-fade-up 0.34s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.animate-pulse-ring {
+  animation: ff-pulse-ring 1.6s ease-out infinite;
+}
+.animate-blink {
+  animation: ff-blink 1.4s ease-in-out infinite;
+}
+
+/* Indeterminate progress sweep for a running agent */
+.sweep {
+  position: relative;
+  overflow: hidden;
+}
+.sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(77, 141, 255, 0.4), transparent);
+  animation: ff-sweep 1.25s ease-in-out infinite;
+}
+
+/* Reduced motion: keep meaning, drop movement. A running agent still reads as
+   running via a static tint. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-up,
+  .animate-pulse-ring,
+  .animate-blink,
+  .sweep::after {
+    animation: none !important;
+  }
+  .animate-fade-up {
+    opacity: 1;
+    transform: none;
+  }
+  .sweep::after {
+    background: rgba(77, 141, 255, 0.22);
+  }
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+  }
+}
