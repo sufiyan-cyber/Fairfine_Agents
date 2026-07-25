@@ -127,7 +127,7 @@ async def _run_adk(
     from google.adk.sessions import InMemorySessionService
     from google.genai import types
 
-    from .agents.adk_agents import build_root_agent
+    from .agents.adk_agents import get_root_agent
 
     session_service = InMemorySessionService()
     app_name = "fairfine"
@@ -157,8 +157,13 @@ async def _run_adk(
         types.Part(text=prompts.build_detector_context(frames, operator_note))
     )
 
+    # Reuse the one agent tree across audits. Building a fresh tree per audit
+    # (as this did) makes ADK construct new internal Gemini clients each time,
+    # which leak connection pools and drive the container out of memory. Session
+    # state keeps concurrent audits isolated, so a shared tree is safe — it is
+    # exactly how `adk web`/`adk api_server` run.
     runner = Runner(
-        app_name=app_name, agent=build_root_agent(), session_service=session_service
+        app_name=app_name, agent=get_root_agent(), session_service=session_service
     )
 
     async for _event in runner.run_async(

@@ -36,9 +36,22 @@ app = FastAPI(
     ),
 )
 
+def _parse_cors_origins(raw: str) -> list[str]:
+    """Parse CORS_ORIGINS into an allow-list.
+
+    Trailing slashes are stripped, because a browser's `Origin` header is only
+    ever scheme+host+port with no path or slash — so a configured
+    `https://app.vercel.app/` would silently never match `https://app.vercel.app`
+    and every request would look like the API is offline. Normalising here means
+    the value works whether or not someone pastes the slash.
+    """
+    origins = [o.strip().rstrip("/") for o in raw.split(",") if o.strip()]
+    return origins or ["*"]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in settings.cors_origins.split(",")] or ["*"],
+    allow_origins=_parse_cors_origins(settings.cors_origins),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],

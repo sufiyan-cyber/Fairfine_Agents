@@ -60,14 +60,32 @@ def _hash_embed(text: str) -> list[float]:
     return [v / norm for v in vec] if norm else vec
 
 
+_genai_client: Any = None
+
+
+def _get_genai_client() -> Any:
+    """One shared Gemini client for the whole process.
+
+    Creating `genai.Client()` per call — as this used to — leaks a connection
+    pool every time, because google-genai's client cleanup is unreliable (see
+    the `_async_httpx_client` AttributeError on aclose). In live mode every
+    audit embeds several times, so those leaked pools accumulated until the
+    container hit its memory limit and was killed. A module-level singleton
+    holds exactly one pool for the life of the process.
+    """
+    global _genai_client
+    if _genai_client is None:
+        from google import genai
+
+        _genai_client = genai.Client(api_key=settings.gemini_api_key)
+    return _genai_client
+
+
 def embed(text: str) -> list[float]:
     """Gemini embeddings when available, hashed fallback otherwise."""
     if settings.live_llm:
         try:
-            from google import genai
-
-            client = genai.Client(api_key=settings.gemini_api_key)
-            result = client.models.embed_content(
+            result = _get_genai_client().models.embed_content(
                 model="gemini-embedding-001",
                 contents=text,
             )
