@@ -15,8 +15,11 @@ backend/data/seed_frames/
 backend/data/demo_clips/
 
 # Secrets — never commit a populated .env
+# `.env.*` is deliberately broad: `.env` alone left variants like
+# `.env.backup` untracked-but-committable, which is one `git add -A` away from
+# publishing a live key. The negation keeps the checked-in template visible.
 .env
-.env.local
+.env.*
 .env*.local
 !.env.example
 

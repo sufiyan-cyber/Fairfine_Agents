@@ -27,6 +27,17 @@ class Settings(BaseSettings):
 
     # --- Models (detection stack is locked by the PRD) ---
     gemini_api_key: str = ""
+    # Route Gemini through Vertex AI instead of the Developer API. Vertex bills
+    # to the project's Cloud billing account — which Google Cloud trial credits
+    # do cover, while Gemini API/AI Studio usage is explicitly excluded from
+    # them — and authenticates with the runtime's service account, so a Cloud
+    # Run deployment carries no API key at all. Leave false to keep using
+    # GEMINI_API_KEY; nothing else in the pipeline changes either way.
+    use_vertex: bool = False
+    google_cloud_project: str = ""
+    # `global` routes to whichever region has capacity, which is the safest
+    # default for a project that has never called Vertex before.
+    google_cloud_location: str = "global"
     # Force the deterministic simulator even when a Gemini key is present. Set
     # FORCE_SIMULATION=1 for a reliable, quota-free, controllable demo — a real
     # value that PowerShell handles cleanly, unlike blanking GEMINI_API_KEY.
@@ -64,10 +75,15 @@ class Settings(BaseSettings):
         return Path(raw)
 
     @property
+    def live_vertex(self) -> bool:
+        """Vertex needs a project; the credentials come from the environment."""
+        return self.use_vertex and bool(self.google_cloud_project.strip())
+
+    @property
     def live_llm(self) -> bool:
         if self.force_simulation:
             return False
-        return bool(self.gemini_api_key.strip())
+        return self.live_vertex or bool(self.gemini_api_key.strip())
 
     @property
     def live_qdrant(self) -> bool:
@@ -86,8 +102,12 @@ class Settings(BaseSettings):
         def label(is_live: bool, live_name: str, fallback_name: str) -> str:
             return live_name if is_live else fallback_name
 
+        inference = "deterministic-simulator"
+        if self.live_llm:
+            inference = "gemini-via-vertex" if self.live_vertex else "gemini"
+
         return {
-            "inference": label(self.live_llm, "gemini", "deterministic-simulator"),
+            "inference": inference,
             "memory": label(self.live_qdrant, "qdrant", "sqlite-vector-fallback"),
             "guardrails": label(self.live_enkrypt, "enkrypt-ai", "local-pii-redactor"),
             "ledger": "sqlite-hash-chain",
@@ -109,13 +129,24 @@ def get_settings() -> Settings:
     # does NOT populate. Without this, every LlmAgent fails with "No API key was
     # provided" even though the key is configured. Export the resolved value so
     # the ADK path and our direct path use exactly the same key.
-    if settings.live_llm:
+    if settings.live_vertex:
+        # Vertex authenticates with Application Default Credentials — the
+        # service account on Cloud Run, or `gcloud auth application-default
+        # login` locally. There is no key to pass, so the API key vars are
+        # cleared: leaving one set makes the SDK prefer the Developer API and
+        # silently ignore every Vertex setting below it.
+        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
+        os.environ["GOOGLE_CLOUD_PROJECT"] = settings.google_cloud_project
+        os.environ["GOOGLE_CLOUD_LOCATION"] = settings.google_cloud_location
+        os.environ.pop("GOOGLE_API_KEY", None)
+        os.environ.pop("GEMINI_API_KEY", None)
+    elif settings.live_llm:
         os.environ["GOOGLE_API_KEY"] = settings.gemini_api_key
         os.environ["GEMINI_API_KEY"] = settings.gemini_api_key
         # Force the Gemini Developer API backend, not Vertex, so a stray
         # GOOGLE_GENAI_USE_VERTEXAI in the shell can't redirect ADK to an auth
         # path this key won't satisfy.
-        os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "false")
+        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "false"
 
     return settings
 

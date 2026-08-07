@@ -77,7 +77,12 @@ def _get_genai_client() -> Any:
     if _genai_client is None:
         from google import genai
 
-        _genai_client = genai.Client(api_key=settings.gemini_api_key)
+        if settings.live_vertex:
+            # Project and location come from the environment `get_settings()`
+            # already bridged; credentials are the runtime's own.
+            _genai_client = genai.Client(vertexai=True)
+        else:
+            _genai_client = genai.Client(api_key=settings.gemini_api_key)
     return _genai_client
 
 
