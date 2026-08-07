@@ -44,13 +44,20 @@ class Settings(BaseSettings):
     force_simulation: bool = False
     detector_model: str = "gemini-2.5-flash"
     plate_model: str = "gemini-2.5-flash"
-    auditor_model: str = "gemini-2.5-pro"
-    citizen_model: str = "gemini-2.5-pro"
+    # Flash rather than Pro for the audit, which the PRD's locked stack called
+    # for. Pro is served from a busier shared pool: measured against these
+    # clips it answered in 57-103s and returned 429s under ordinary rehearsal
+    # load, while Flash answered in 41-57s and reached the same verdicts. The
+    # prompt, the five vetoes and the thresholds are what decide a case, and
+    # they are identical either way. Set AUDITOR_MODEL=gemini-2.5-pro to take
+    # the deeper reasoning and accept the latency.
+    auditor_model: str = "gemini-2.5-flash"
+    citizen_model: str = "gemini-2.5-flash"
     # Used only when the auditor's model is still rate-limited after retries.
     # Vertex serves the larger models from a shared capacity pool, so a 429
-    # there means the pool is busy, not that the request is wrong. Set empty to
-    # disable and let the audit fail instead.
-    auditor_fallback_model: str = "gemini-2.5-flash"
+    # there means the pool is busy, not that the request is wrong. Ignored when
+    # it matches `auditor_model`; set empty to let the audit fail instead.
+    auditor_fallback_model: str = "gemini-2.5-flash-lite"
 
     # --- Semantic memory ---
     qdrant_url: str = ""

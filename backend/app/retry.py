@@ -35,13 +35,27 @@ MAX_TOTAL_WAIT_SECONDS = 60.0
 
 
 def _causes(exc: BaseException):
-    """Walk the exception chain — ADK wraps the underlying genai error."""
+    """Every exception reachable from `exc`, by cause, context *or* group.
+
+    ADK wraps the underlying genai error, so the chain has to be walked. It
+    also runs the perception stage as a `ParallelAgent`, which awaits its
+    sub-agents in a TaskGroup — so a rate limit while the detector and the
+    plate reader are in flight arrives as an `ExceptionGroup`. Its children
+    hang off `.exceptions`, which `__cause__`/`__context__` never reach: the
+    429 was there, invisible, and the audit failed without a single retry.
+    """
     seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
+    stack: list[BaseException | None] = [exc]
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in seen:
+            continue
         seen.add(id(current))
         yield current
-        current = current.__cause__ or current.__context__
+        if isinstance(current, BaseExceptionGroup):
+            stack.extend(current.exceptions)
+        stack.append(current.__cause__)
+        stack.append(current.__context__)
 
 
 def is_retryable(exc: BaseException) -> bool:

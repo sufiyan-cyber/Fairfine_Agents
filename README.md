@@ -55,12 +55,14 @@ Every dependency is optional and degrades to a working local implementation. Cop
 
 | Variable | Without it | With it |
 |---|---|---|
-| `GEMINI_API_KEY` | Deterministic rule engine; UI shows **simulation mode** | Full ADK pipeline on Gemini 2.5 Pro/Flash |
+| `GEMINI_API_KEY` | Deterministic rule engine; UI shows **simulation mode** | Full ADK pipeline on Gemini 2.5 |
+| `USE_VERTEX` + `GOOGLE_CLOUD_PROJECT` | Gemini Developer API, authenticated by key | Same models via Vertex, authenticated by the runtime's service account — no key in the deployment |
 | `QDRANT_URL` / `QDRANT_API_KEY` | In-process cosine index over the same embeddings | Qdrant Cloud collections |
 | `ENKRYPT_API_KEY` | Local regex PII redactor + bias deny-list | Enkrypt AI guardrails on top |
 
-The mode is displayed in the nav on every screen. Claiming live inference while simulating
-would undercut the whole premise, so the app never does.
+The mode is displayed in the nav on every screen, and reports *which* backend answered —
+`gemini` or `gemini-via-vertex`. Claiming live inference while simulating would undercut
+the whole premise, so the app never does.
 
 ---
 
@@ -77,7 +79,7 @@ FairFineOrchestrator (SequentialAgent)
 │
 ├─ MemoryAgent           BaseAgent · Qdrant duplicate sweep + MV Act RAG
 │
-├─ AuditorAgent ★        LlmAgent · gemini-2.5-pro   · output_schema=Verdict
+├─ AuditorAgent ★        LlmAgent · gemini-2.5-flash · output_schema=Verdict
 │
 └─ VerdictRouter         BaseAgent
     ├─ ISSUE    → EvidenceAgent   (LlmAgent + mock VAHAN tool)
@@ -88,7 +90,17 @@ after_agent_callback → ledger append (every verdict, cannot be skipped)
 
 CitizenAgent   separate entrypoint · explains the decision in en/hi/kn/ta
 ReAuditAgent   invoked on dispute · re-decides against the stored evidence
+ReviewAgent    the human · resolves ESCALATE at /review, ledgered as HUMAN_REVIEW
 ```
+
+**On model choice.** The auditor runs on Flash, not Pro. Pro is served from a busier
+shared pool: measured against these clips it answered in 57–103s and returned 429s under
+ordinary rehearsal load, while Flash answered in 41–57s and reached the same verdicts.
+What decides a case is the prompt, the five vetoes and the thresholds — identical either
+way. Set `AUDITOR_MODEL=gemini-2.5-pro` to take the deeper reasoning and accept the
+latency; `AUDITOR_FALLBACK_MODEL` then re-runs the audit a tier down rather than failing
+it when that pool is saturated. Transient 429s and 503s are retried with backoff,
+honouring the server's own `retryDelay`, before any of that is reached.
 
 **ADK features carrying real weight**
 
@@ -144,6 +156,8 @@ evidence the verdict was drawn from.
 | `GET` | `/api/challan/{id}` | Officer view — full evidence packet |
 | `GET` | `/api/challan/{id}/citizen?lang=kn` | Citizen view, plain language |
 | `POST` | `/api/challan/{id}/dispute` | `{reason}` → triggers ReAuditAgent |
+| `GET` | `/api/review-queue` | Open escalations awaiting an officer |
+| `POST` | `/api/review/{id}/decide` | `{decision, officer, note}` → closes an escalation, appended as `HUMAN_REVIEW` |
 | `GET` | `/api/ledger` | Paginated ledger records |
 | `GET` | `/api/ledger/verify` | Recompute the chain → `{valid, broken_at?}` |
 | `GET` | `/api/dashboard/bias` | Aggregates by area, vehicle type, violation, hour |
@@ -163,6 +177,7 @@ Interactive docs at `/docs`.
 | `/` | Landing — thesis, live counters read from the running system |
 | `/console` | Officer console — upload, live SSE agent trace, verdict, **naive vs FairFine** split |
 | `/challan/[id]` | Citizen portal — plain-language reasoning, 4 languages, evidence, dispute |
+| `/review` | Human review — the escalation queue, the evidence the auditor judged, and the officer's decision |
 | `/ledger` | Ledger explorer — records, hash links, live chain verification |
 | `/dashboard` | Bias dashboard — disaggregated false-positive rates |
 
@@ -248,7 +263,11 @@ These are enforced in code, not just documented:
 - **Every LLM call is PII-scrubbed at prompt assembly**, via `before_model_callback`, and
   the local redactor runs whether or not Enkrypt is configured.
 - **Human in the loop for ambiguity.** FairFine is decision support. It does not replace
-  police officers.
+  police officers. `ESCALATE` is a real outcome with a real screen: an officer cannot
+  close a case without stating a reason, that reason is redacted and ledgered, and the
+  auditor's own verdict is left standing beside it. A queue nothing can answer would
+  reproduce the failure this project exists to name — a human check with no record of
+  whether anyone looked.
 
 ## Not built (by design)
 
