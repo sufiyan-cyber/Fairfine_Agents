@@ -360,6 +360,38 @@ class SemanticMemory:
         )
 
     # -- duplicate detection ------------------------------------------------ #
+    def reset_events(self) -> None:
+        """Forget every remembered event.
+
+        `db.reset_database()` clears the challans and the ledger, but the
+        duplicate sweep reads from semantic memory, which outlived it. So a
+        clip audited during rehearsal stayed remembered: re-uploading it after
+        a reset matched that earlier run — same plate, same location, and the
+        *same event timestamp*, because that is parsed from the filename rather
+        than the clock — and the headline ISSUE scenario came back REJECT as a
+        duplicate, on stage, with the ledger looking convincingly empty.
+
+        Points are deleted rather than the collection dropped, keeping the
+        promise that FairFine never destroys a collection it may be sharing
+        with another project.
+        """
+        self._local_events = []
+        if self._qdrant is None:
+            return
+        try:
+            from qdrant_client.models import Filter, FilterSelector
+
+            self._qdrant.delete(
+                collection_name=self._collection("events"),
+                points_selector=FilterSelector(filter=Filter()),
+            )
+        except Exception as exc:  # noqa: BLE001 — a demo reset must not 500
+            print(
+                f"[memory] could not clear remembered events: "
+                f"{type(exc).__name__}: {str(exc)[:200]}",
+                flush=True,
+            )
+
     def remember_event(
         self, challan_id: str, plate: str, location: str, violation_type: str, ts: str, description: str
     ) -> None:

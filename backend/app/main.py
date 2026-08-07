@@ -323,8 +323,15 @@ async def rules(q: str = Query("", description="Semantic query over the MV Act c
 # --------------------------------------------------------------------------- #
 @app.post("/api/demo/reset")
 async def demo_reset() -> dict:
-    """Wipe all state so a pitch can be run from zero."""
+    """Wipe all state so a pitch can be run from zero.
+
+    Semantic memory is cleared alongside the tables. Leaving it behind meant a
+    reset only *looked* clean: the duplicate sweep still remembered every clip
+    audited during rehearsal, so the first upload after a reset came back
+    REJECT as a duplicate of a run nobody could see any more.
+    """
     await asyncio.to_thread(db.reset_database)
+    await asyncio.to_thread(memory.reset_events)
     return {"status": "reset", "ledger": await asyncio.to_thread(db.verify_chain)}
 
 
@@ -366,6 +373,7 @@ async def demo_seed(force: bool = Query(False)) -> dict:
 
     seed = _load_seed_module()
     await asyncio.to_thread(db.reset_database)
+    await asyncio.to_thread(memory.reset_events)
     seed.SEED_DIR.mkdir(parents=True, exist_ok=True)
 
     was_forced = settings.force_simulation
