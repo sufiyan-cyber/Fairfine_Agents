@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Any
 
 from ..config import settings
+from ..retry import with_retry_sync
 from ..schemas import DuplicateCheck, RuleCitation
 from . import mv_act
 
@@ -35,26 +36,30 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in re.split(r"[^a-z0-9]+", text.lower()) if t]
 
 
-def _hash_embed(text: str) -> list[float]:
+def _hash_embed(text: str, dim: int = _EMBED_DIM) -> list[float]:
     """Deterministic hashed bag-of-words with L2 normalisation.
 
     Not a semantic model — but for short, vocabulary-constrained strings like
     violation descriptions and statute text it gives a stable, meaningful
     cosine ordering without any network call.
+
+    `dim` is a parameter because a fallback vector must match the width of
+    whatever the live model produces. A 256-wide fallback mixed into a batch of
+    3072-wide embeddings makes Qdrant reject the entire upsert.
     """
-    vec = [0.0] * _EMBED_DIM
+    vec = [0.0] * dim
     tokens = _tokenize(text)
     if not tokens:
         return vec
     for token in tokens:
         digest = hashlib.md5(token.encode()).digest()
-        idx = int.from_bytes(digest[:4], "big") % _EMBED_DIM
+        idx = int.from_bytes(digest[:4], "big") % dim
         sign = 1.0 if digest[4] % 2 == 0 else -1.0
         vec[idx] += sign
     # Bigrams add a little word-order sensitivity.
     for a, b in zip(tokens, tokens[1:]):
         digest = hashlib.md5(f"{a}_{b}".encode()).digest()
-        idx = int.from_bytes(digest[:4], "big") % _EMBED_DIM
+        idx = int.from_bytes(digest[:4], "big") % dim
         vec[idx] += 0.5 if digest[4] % 2 == 0 else -0.5
     norm = math.sqrt(sum(v * v for v in vec))
     return [v / norm for v in vec] if norm else vec
@@ -86,20 +91,67 @@ def _get_genai_client() -> Any:
     return _genai_client
 
 
-def embed(text: str) -> list[float]:
-    """Gemini embeddings when available, hashed fallback otherwise."""
+# Width of the live embedding model, learned on first success. A fallback must
+# match it, or a mixed-width batch is rejected wholesale by Qdrant.
+_live_dim: int | None = None
+
+# One request carries many texts. The corpus is 22 documents and the embedding
+# model's per-minute *request* quota is low on a new project, so embedding them
+# one at a time spent 22 units of quota to do one batch's work — and the calls
+# that got refused fell back to a different width, which is what actually broke
+# the upsert.
+_EMBED_BATCH = 32
+
+
+def _embed_live(texts: list[str]) -> list[list[float]]:
+    """Embed a list of texts with the live model, batched and retried."""
+    client = _get_genai_client()
+    out: list[list[float]] = []
+    for start in range(0, len(texts), _EMBED_BATCH):
+        chunk = texts[start : start + _EMBED_BATCH]
+        result = with_retry_sync(
+            lambda: client.models.embed_content(
+                model="gemini-embedding-001", contents=chunk
+            ),
+            label="gemini-embedding",
+        )
+        for embedding in result.embeddings:
+            values = list(embedding.values)
+            norm = math.sqrt(sum(v * v for v in values))
+            out.append([v / norm for v in values] if norm else values)
+    return out
+
+
+def embed_many(texts: list[str]) -> list[list[float]]:
+    """Embed several texts at once. Every vector returned has the same width.
+
+    On failure the whole batch falls back together. Falling back per-text — as
+    the previous per-text implementation effectively did — produced batches
+    mixing 3072-wide model output with 256-wide local vectors, and Qdrant
+    rejects such an upsert entirely, silently dropping the process to the local
+    index for the rest of its life.
+    """
+    global _live_dim
+    if not texts:
+        return []
     if settings.live_llm:
         try:
-            result = _get_genai_client().models.embed_content(
-                model="gemini-embedding-001",
-                contents=text,
+            vectors = _embed_live(texts)
+            if vectors:
+                _live_dim = len(vectors[0])
+            return vectors
+        except Exception as exc:  # noqa: BLE001 — degrade, but say so
+            print(
+                f"[embed] live embedding failed, using local vectors: "
+                f"{type(exc).__name__}: {str(exc)[:200]}",
+                flush=True,
             )
-            values = list(result.embeddings[0].values)
-            norm = math.sqrt(sum(v * v for v in values))
-            return [v / norm for v in values] if norm else values
-        except Exception:
-            pass  # fall through to local embedding
-    return _hash_embed(text)
+    return [_hash_embed(t, _live_dim or _EMBED_DIM) for t in texts]
+
+
+def embed(text: str) -> list[float]:
+    """Gemini embeddings when available, hashed fallback otherwise."""
+    return embed_many([text])[0]
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -171,7 +223,7 @@ class SemanticMemory:
 
     def _index_rules(self) -> None:
         docs = mv_act.corpus_documents()
-        vectors = [(embed(d["text"]), d) for d in docs]
+        vectors = list(zip(embed_many([d["text"] for d in docs]), docs))
         self._local_rules = vectors
         self._build_lexical_index(docs)
 

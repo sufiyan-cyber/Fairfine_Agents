@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import random
 import re
+import time
 from typing import Awaitable, Callable, TypeVar
 
 T = TypeVar("T")
@@ -109,5 +110,38 @@ async def with_retry(
                     flush=True,
                 )
             await asyncio.sleep(delay)
+
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
+def with_retry_sync(call: Callable[[], T], *, label: str = "gemini") -> T:
+    """Blocking twin of `with_retry`, for the embedding path.
+
+    Embeddings are computed synchronously inside `asyncio.to_thread`, so they
+    cannot await the async version.
+    """
+    waited = 0.0
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            return call()
+        except Exception as exc:  # noqa: BLE001 — non-retryable is re-raised below
+            if attempt == MAX_ATTEMPTS or not _is_retryable(exc):
+                raise
+
+            delay = _server_retry_delay(exc)
+            if delay is None:
+                delay = min(2.0 * 2 ** (attempt - 1), 8.0)
+            delay += random.uniform(0, 0.5)
+
+            if waited + delay > MAX_TOTAL_WAIT_SECONDS:
+                raise
+            waited += delay
+
+            print(
+                f"[retry] {label} attempt {attempt}/{MAX_ATTEMPTS} failed, "
+                f"retrying in {delay:.1f}s - {type(exc).__name__}: {str(exc)[:160]}",
+                flush=True,
+            )
+            time.sleep(delay)
 
     raise RuntimeError("unreachable")  # pragma: no cover
