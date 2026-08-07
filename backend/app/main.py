@@ -16,6 +16,7 @@ from . import analytics, db, pipeline
 from .agents import citizen as citizen_agent
 from .agents.adk_agents import describe_architecture
 from .config import UPLOAD_DIR, settings
+from .guardrails import enkrypt
 from .schemas import (
     AuditResult,
     BiasDashboard,
@@ -23,6 +24,8 @@ from .schemas import (
     DisputeOutcome,
     DisputeRequest,
     LedgerVerification,
+    ReviewDecision,
+    ReviewOutcome,
 )
 from .tools import mv_act
 from .tools.memory import memory
@@ -299,6 +302,60 @@ async def ledger_record(record_id: str) -> dict:
 # --------------------------------------------------------------------------- #
 # Review queue + dashboard
 # --------------------------------------------------------------------------- #
+@app.post("/api/review/{review_id}/decide", response_model=ReviewOutcome)
+async def decide_review(review_id: str, body: ReviewDecision) -> ReviewOutcome:
+    """Close an escalated case with an officer's decision.
+
+    The decision is appended to the ledger rather than applied silently, and
+    the audit's own verdict is left standing. A human overruling the machine is
+    the single most consequential event in the system, so it is the one that
+    most needs to be permanently visible next to what the machine said —
+    exactly as a dispute appends its re-audit instead of overwriting.
+    """
+    review = await asyncio.to_thread(db.get_review, review_id)
+    if review is None:
+        raise HTTPException(status_code=404, detail=f"No review {review_id}.")
+    if review["status"] != "open":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Review {review_id} was already decided ({review['decision']}).",
+        )
+
+    # The officer's free text is ledgered and shown to the citizen, so it goes
+    # through the same redaction as every other human-authored string.
+    guarded = enkrypt.redact_pii(body.note)
+    resolved = await asyncio.to_thread(
+        db.resolve_review, review_id, body.decision, body.officer.strip(), guarded.text
+    )
+    if resolved is None:
+        raise HTTPException(status_code=409, detail="Review was decided concurrently.")
+
+    ledger_id, ledger_hash = await asyncio.to_thread(
+        db.append_ledger,
+        {
+            "challan_id": review["challan_id"],
+            "event": "HUMAN_REVIEW",
+            "review_id": review_id,
+            "decision": body.decision,
+            "officer": body.officer.strip(),
+            "note": guarded.text,
+            "escalated_at_trust": review["trust_score"],
+            "uncertainty": review["uncertainty"],
+        },
+    )
+
+    return ReviewOutcome(
+        review_id=review_id,
+        challan_id=review["challan_id"],
+        decision=body.decision,
+        officer=body.officer.strip(),
+        note=guarded.text,
+        decided_at=resolved["decided_at"],
+        ledger_id=ledger_id,
+        ledger_hash=ledger_hash,
+    )
+
+
 @app.get("/api/review-queue")
 async def review_queue(limit: int = Query(50, ge=1, le=200)) -> dict:
     rows = await asyncio.to_thread(db.list_pending_reviews, limit)

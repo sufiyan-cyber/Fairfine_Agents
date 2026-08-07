@@ -109,6 +109,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             uncertainty   TEXT NOT NULL,
             trust_score   REAL NOT NULL,
             status        TEXT NOT NULL DEFAULT 'open',
+            decision      TEXT NOT NULL DEFAULT '',
+            officer       TEXT NOT NULL DEFAULT '',
+            note          TEXT NOT NULL DEFAULT '',
+            decided_at    TEXT NOT NULL DEFAULT '',
             created_at    TEXT NOT NULL,
             FOREIGN KEY (challan_id) REFERENCES challans(challan_id)
         );
@@ -130,7 +134,30 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_ledger_ts        ON ledger(ts);
         """
     )
+    _add_missing_columns(conn)
     conn.commit()
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Bring an existing database up to the current schema.
+
+    `CREATE TABLE IF NOT EXISTS` silently does nothing when the table already
+    exists, so a column added later never reaches a database created before it
+    — including a developer's local file that has a demo history worth keeping.
+    """
+    wanted = {
+        "pending_review": {
+            "decision": "TEXT NOT NULL DEFAULT ''",
+            "officer": "TEXT NOT NULL DEFAULT ''",
+            "note": "TEXT NOT NULL DEFAULT ''",
+            "decided_at": "TEXT NOT NULL DEFAULT ''",
+        },
+    }
+    for table, columns in wanted.items():
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, spec in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {spec}")
 
 
 # --------------------------------------------------------------------------- #
@@ -367,6 +394,40 @@ def list_pending_reviews(limit: int = 50) -> list[dict]:
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_review(review_id: str) -> dict | None:
+    conn = get_conn()
+    with _lock:
+        row = conn.execute(
+            "SELECT * FROM pending_review WHERE id = ?", (review_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def resolve_review(review_id: str, decision: str, officer: str, note: str) -> dict | None:
+    """Close a review with the officer's decision, reason and identity.
+
+    The reason is stored, not just the outcome. An escalation that records only
+    ISSUE or REJECT would reproduce exactly what FairFine objects to upstream:
+    a human confirming a machine with nothing written down, and no way to tell
+    afterwards whether anyone actually looked.
+    """
+    conn = get_conn()
+    with _lock:
+        cur = conn.execute(
+            "UPDATE pending_review"
+            "   SET status = 'resolved', decision = ?, officer = ?, note = ?, decided_at = ?"
+            " WHERE id = ? AND status = 'open'",
+            (decision, officer, note, utc_now(), review_id),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return None
+        row = conn.execute(
+            "SELECT * FROM pending_review WHERE id = ?", (review_id,)
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def record_dispute(

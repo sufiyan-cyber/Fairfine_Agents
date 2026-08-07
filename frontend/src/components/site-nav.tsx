@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 
 const LINKS = [
   { href: "/console", label: "Audit Console" },
+  { href: "/review", label: "Human Review" },
   { href: "/ledger", label: "Ledger" },
   { href: "/dashboard", label: "Bias Dashboard" },
 ];

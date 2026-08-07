@@ -133,6 +133,30 @@ export interface CitizenView {
   dispute_status: string | null;
 }
 
+export interface PendingReview {
+  id: string;
+  challan_id: string;
+  uncertainty: string;
+  trust_score: number;
+  status: string;
+  decision: string;
+  officer: string;
+  note: string;
+  decided_at: string;
+  created_at: string;
+}
+
+export interface ReviewOutcome {
+  review_id: string;
+  challan_id: string;
+  decision: "ISSUE" | "REJECT";
+  officer: string;
+  note: string;
+  decided_at: string;
+  ledger_id: string;
+  ledger_hash: string;
+}
+
 export interface DisputeOutcome {
   challan_id: string;
   original_verdict: VerdictType;

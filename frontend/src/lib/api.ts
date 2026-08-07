@@ -10,6 +10,8 @@ import type {
   Language,
   LedgerRecord,
   LedgerVerification,
+  PendingReview,
+  ReviewOutcome,
 } from "./types";
 
 export const API_BASE = (
@@ -74,8 +76,13 @@ export const api = {
   verifyLedger: () => get<LedgerVerification>("/api/ledger/verify"),
 
   dashboard: () => get<BiasDashboard>("/api/dashboard/bias"),
-  reviewQueue: () =>
-    get<{ items: Array<Record<string, unknown>>; count: number }>("/api/review-queue"),
+  reviewQueue: () => get<{ items: PendingReview[]; count: number }>("/api/review-queue"),
+  decideReview: (reviewId: string, decision: "ISSUE" | "REJECT", officer: string, note: string) =>
+    get<ReviewOutcome>(`/api/review/${encodeURIComponent(reviewId)}/decide`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision, officer, note }),
+    }),
 
   scenarios: () =>
     get<{ scenarios: Array<{ id: string; label: string; violation: string; expected_verdict: string }>; mode: string }>(

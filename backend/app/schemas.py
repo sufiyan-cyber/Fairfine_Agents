@@ -179,6 +179,29 @@ class DisputeRequest(BaseModel):
     language: Language = "en"
 
 
+class ReviewDecision(BaseModel):
+    """An officer closing an escalated case.
+
+    `note` is required and has a floor, because a decision with no stated
+    reason is the failure mode this queue exists to prevent.
+    """
+
+    decision: Literal["ISSUE", "REJECT"]
+    officer: str = Field(min_length=1, max_length=120)
+    note: str = Field(min_length=10, max_length=4000)
+
+
+class ReviewOutcome(BaseModel):
+    review_id: str
+    challan_id: str
+    decision: Literal["ISSUE", "REJECT"]
+    officer: str
+    note: str
+    decided_at: str
+    ledger_id: str
+    ledger_hash: str
+
+
 class DisputeOutcome(BaseModel):
     challan_id: str
     original_verdict: VerdictType
