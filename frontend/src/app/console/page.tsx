@@ -20,7 +20,6 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
-  EmptyState,
   ErrorState,
   Eyebrow,
   buttonVariants,
@@ -80,6 +79,7 @@ export default function ConsolePage() {
   }, []);
 
   const showScenarioPicker = mode === "simulation" && scenarios.length > 0;
+  const showVerdictColumn = Boolean(result || error);
 
   const start = React.useCallback(
     (target: File) => {
@@ -139,11 +139,25 @@ export default function ConsolePage() {
           </p>
         </header>
 
-        <div className="grid gap-5 lg:grid-cols-[minmax(0,380px)_minmax(0,1fr)]">
+        <div
+          className={cn(
+            "grid items-start gap-5",
+            // Until there is a verdict (or an error) the right column has
+            // nothing to say, and an empty panel beside a narrow rail reads
+            // as a broken page. So idle and running audits spread the upload
+            // and the pipeline across the full width, and the rail layout
+            // only appears together with the content that justifies it.
+            showVerdictColumn
+              ? "lg:grid-cols-[minmax(0,380px)_minmax(0,1fr)]"
+              : "lg:grid-cols-2",
+          )}
+        >
           {/* ------------------------------------------------------------ */}
-          {/* Left rail: upload + trace                                     */}
+          {/* Upload + trace: a left rail once a verdict is shown,          */}
+          {/* two full-width columns before that (lg:contents dissolves     */}
+          {/* the wrapper so both cards become grid children).              */}
           {/* ------------------------------------------------------------ */}
-          <div className="space-y-5">
+          <div className={cn("space-y-5", !showVerdictColumn && "lg:contents")}>
             <Card>
               <CardHeader>
                 <CardTitle>Evidence clip</CardTitle>
@@ -292,32 +306,21 @@ export default function ConsolePage() {
           </div>
 
           {/* ------------------------------------------------------------ */}
-          {/* Right: verdict                                                */}
+          {/* Right: verdict — only mounted once there is something to show */}
           {/* ------------------------------------------------------------ */}
-          <div className="space-y-5">
-            {error ? (
-              <ErrorState
-                title="Audit failed"
-                message={error}
-                onRetry={file ? () => start(file) : undefined}
-              />
-            ) : null}
+          {showVerdictColumn ? (
+            <div className="space-y-5">
+              {error ? (
+                <ErrorState
+                  title="Audit failed"
+                  message={error}
+                  onRetry={file ? () => start(file) : undefined}
+                />
+              ) : null}
 
-            {!result && !error ? (
-              <Card className="min-h-[420px]">
-                <EmptyState
-                  icon={<Zap className="size-8" />}
-                  title={running ? "Agents are running" : "No audit yet"}
-                >
-                  {running
-                    ? "Watch the trace on the left — each agent reports its structured output as it finishes."
-                    : "Upload a clip and run the audit. The verdict, the evidence, and what a threshold-only system would have done all appear here."}
-                </EmptyState>
-              </Card>
-            ) : null}
-
-            {result ? <VerdictPanel result={result} /> : null}
-          </div>
+              {result ? <VerdictPanel result={result} /> : null}
+            </div>
+          ) : null}
         </div>
       </main>
 
