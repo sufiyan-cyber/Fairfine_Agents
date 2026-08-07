@@ -39,6 +39,27 @@ def compute_hash(prev_hash: str, payload: Any, ts: str) -> str:
     return hashlib.sha256(material).hexdigest()
 
 
+def evidence_digest(frame_uris: list[str]) -> str:
+    """One digest binding an ordered set of evidence frames.
+
+    Without this the chain proves only that a *verdict* was not altered. The
+    frames a citizen is shown sit in a separate table, unhashed, so evidence
+    could be swapped under a decision and every link would still verify. Naming
+    the evidence in the ledgered payload closes that: altering a frame now
+    breaks the chain from that record onward.
+
+    Each frame is hashed, then the concatenation is hashed, so the ledger
+    commits to the frames *and* their order while an individual frame can still
+    be checked on its own.
+
+    Computed over the stored data URIs rather than the sampled JPEGs on disk:
+    those are discarded when the audit ends, so a digest of them could never be
+    recomputed by anyone verifying the record later.
+    """
+    per_frame = [hashlib.sha256(uri.encode("utf-8")).hexdigest() for uri in frame_uris]
+    return hashlib.sha256("".join(per_frame).encode("utf-8")).hexdigest()
+
+
 def get_conn() -> sqlite3.Connection:
     global _conn
     with _lock:

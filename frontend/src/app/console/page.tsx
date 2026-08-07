@@ -196,7 +196,7 @@ export default function ConsolePage() {
                         Drop a clip here, or choose a file
                       </p>
                       <p className="text-[11.5px] text-ink-faint">
-                        mp4 · mov · avi · mkv · jpg · png — up to 60 MB
+                        mp4 · mov · avi · mkv · jpg · png — up to 200 MB
                       </p>
                     </div>
                   )}

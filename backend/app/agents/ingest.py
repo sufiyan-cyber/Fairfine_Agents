@@ -89,7 +89,69 @@ def _ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def _probe_duration(source: Path) -> float:
+    """Clip length in seconds via ffprobe; 0.0 when it cannot be determined."""
+    if shutil.which("ffprobe") is None:
+        return 0.0
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(source),
+    ]
+    try:
+        probe = subprocess.run(cmd, check=True, capture_output=True, timeout=20)
+        return float(probe.stdout.decode().strip())
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
+        return 0.0
+
+
+def _sample_by_seek(source: Path, out_dir: Path, count: int, duration: float) -> list[Path]:
+    """Sample `count` frames spread across a clip longer than the event window.
+
+    One decode per frame, seeking to each timestamp. Input seeking (`-ss` before
+    `-i`) jumps to the nearest keyframe rather than decoding everything it
+    passes over, so sampling a five-minute clip costs about what a five-second
+    one does. Timestamps are centred in their slice — sampling at t=0 tends to
+    land on a black or half-rendered opening frame.
+    """
+    written: list[Path] = []
+    for i in range(count):
+        ts = duration * (i + 0.5) / count
+        path = out_dir / f"frame_{i + 1:03d}.jpg"
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{ts:.3f}", "-i", str(source),
+            "-vf", "scale='min(1280,iw)':-2",
+            "-frames:v", "1",
+            "-q:v", "3",
+            str(path),
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=30)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            continue
+        if path.exists():
+            written.append(path)
+    return written
+
+
 def _sample_with_ffmpeg(source: Path, out_dir: Path, count: int, window: int) -> list[Path]:
+    """Sample `count` frames covering the event.
+
+    A clip longer than the event window is sampled across its whole duration.
+    Deriving fps from `window` alone — as this did — pins every frame inside the
+    opening few seconds, so on a 30-second upload the models never see the other
+    27 and the verdict is drawn from footage that may not contain the event at
+    all. Short clips keep the single-pass `fps` filter, which is cheaper than a
+    seek per frame and covers them completely either way.
+    """
+    duration = _probe_duration(source)
+    if duration > window:
+        frames = _sample_by_seek(source, out_dir, count, duration)
+        if frames:
+            return frames
+
     fps = max(count / max(window, 1), 1)
     pattern = out_dir / "frame_%03d.jpg"
     cmd = [

@@ -27,6 +27,10 @@ class Settings(BaseSettings):
 
     # --- Models (detection stack is locked by the PRD) ---
     gemini_api_key: str = ""
+    # Force the deterministic simulator even when a Gemini key is present. Set
+    # FORCE_SIMULATION=1 for a reliable, quota-free, controllable demo — a real
+    # value that PowerShell handles cleanly, unlike blanking GEMINI_API_KEY.
+    force_simulation: bool = False
     detector_model: str = "gemini-2.5-flash"
     plate_model: str = "gemini-2.5-flash"
     auditor_model: str = "gemini-2.5-pro"
@@ -61,6 +65,8 @@ class Settings(BaseSettings):
 
     @property
     def live_llm(self) -> bool:
+        if self.force_simulation:
+            return False
         return bool(self.gemini_api_key.strip())
 
     @property
@@ -103,7 +109,7 @@ def get_settings() -> Settings:
     # does NOT populate. Without this, every LlmAgent fails with "No API key was
     # provided" even though the key is configured. Export the resolved value so
     # the ADK path and our direct path use exactly the same key.
-    if settings.gemini_api_key:
+    if settings.live_llm:
         os.environ["GOOGLE_API_KEY"] = settings.gemini_api_key
         os.environ["GEMINI_API_KEY"] = settings.gemini_api_key
         # Force the Gemini Developer API backend, not Vertex, so a stray

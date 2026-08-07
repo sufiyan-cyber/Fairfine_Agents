@@ -143,6 +143,7 @@ class AuditResult(BaseModel):
     evidence: EvidencePacket | None = None
     ledger_id: str = ""
     ledger_hash: str = ""
+    frames_sha256: str = ""
     trace: list[AuditTrace] = Field(default_factory=list)
     naive: NaiveComparison | None = None
     created_at: str = ""

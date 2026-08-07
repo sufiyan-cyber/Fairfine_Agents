@@ -286,10 +286,13 @@ def audit(
         verdict = "ESCALATE"
     elif trust >= settings.issue_trust_threshold and environment_ok:
         verdict = "ISSUE"
-    elif trust >= settings.escalate_trust_floor:
-        verdict = "ESCALATE"
     else:
-        verdict = "REJECT"
+        # A real, visually-confirmed violation with any remaining doubt — low
+        # trust, poor lighting, etc. — is ESCALATED to a human, never REJECTed.
+        # REJECT is reserved for duplicates and violations that aren't real
+        # (handled above). Dismissing a genuine violation would let a real
+        # offender off; a human should resolve the doubt instead.
+        verdict = "ESCALATE"
 
     checks = VerdictChecks(
         visually_confirmed=visually_confirmed,

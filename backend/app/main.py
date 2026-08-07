@@ -57,7 +57,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MAX_UPLOAD_BYTES = 60 * 1024 * 1024
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 ALLOWED_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".jpg", ".jpeg", ".png", ".webp"}
 
 
@@ -122,14 +122,27 @@ async def _persist_upload(file: UploadFile) -> Path:
 
     target = UPLOAD_DIR / f"{uuid.uuid4().hex[:10]}_{Path(file.filename or 'clip').name}"
     size = 0
-    with target.open("wb") as out:
-        while chunk := await file.read(1 << 20):
-            size += len(chunk)
-            if size > MAX_UPLOAD_BYTES:
-                out.close()
-                target.unlink(missing_ok=True)
-                raise HTTPException(status_code=413, detail="File exceeds the 60 MB limit.")
-            out.write(chunk)
+    try:
+        with target.open("wb") as out:
+            while chunk := await file.read(1 << 20):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    out.close()
+                    target.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.",
+                    )
+                out.write(chunk)
+    finally:
+        # Starlette spools the multipart body into its own temp file, which
+        # lives until the request ends — and the request does not end until the
+        # SSE audit finishes streaming, minutes later. Closing here drops that
+        # second copy as soon as we have our own, halving the peak for a large
+        # clip. That matters most where the filesystem is in memory (Cloud
+        # Run's is), because there the spare copy is spare RAM.
+        await file.close()
+
     if size == 0:
         target.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
@@ -313,6 +326,69 @@ async def demo_reset() -> dict:
     """Wipe all state so a pitch can be run from zero."""
     await asyncio.to_thread(db.reset_database)
     return {"status": "reset", "ledger": await asyncio.to_thread(db.verify_chain)}
+
+
+def _load_seed_module():
+    """Import `scripts/seed_demo.py`, which ships inside the image."""
+    import importlib
+    import sys
+
+    scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    return importlib.import_module("seed_demo")
+
+
+@app.post("/api/demo/seed")
+async def demo_seed(force: bool = Query(False)) -> dict:
+    """Populate the ledger and bias dashboard with a decision history.
+
+    A container's filesystem does not survive a redeploy or an instance
+    recycle, and there is no shell to run `scripts/seed_demo.py` in, so a
+    freshly deployed backend otherwise serves an empty ledger and an empty
+    dashboard — the two screens a pitch opens on. This runs the same seed
+    events through the same pipeline, so the hash chain still verifies:
+    nothing is inserted behind the pipeline's back.
+
+    Seeding forces simulation regardless of configured mode. The seed frames
+    are flat synthetic stills carrying their scenario in the filename; sending
+    them through live vision would spend real quota to have a model correctly
+    report "no violation visible" on a blank rectangle. An audit that arrives
+    during the ~30s seed therefore also runs in simulation — acceptable for
+    what is an operator action taken before a demo, not during one.
+    """
+    existing = await asyncio.to_thread(db.list_challans, 1, None)
+    if existing and not force:
+        raise HTTPException(
+            status_code=409,
+            detail="Ledger already has records. Pass ?force=true to reset and reseed.",
+        )
+
+    seed = _load_seed_module()
+    await asyncio.to_thread(db.reset_database)
+    seed.SEED_DIR.mkdir(parents=True, exist_ok=True)
+
+    was_forced = settings.force_simulation
+    settings.force_simulation = True
+    counts = {"ISSUE": 0, "REJECT": 0, "ESCALATE": 0}
+    try:
+        for scenario, junction, camera, ts in seed.SEED_EVENTS:
+            filename = f"{scenario}_{camera}_{junction}_{ts}.jpg"
+            path = seed.SEED_DIR / filename
+            await asyncio.to_thread(seed._still, path, f"{scenario} @ {junction} {ts}")
+            result = await seed._run_one(path, filename)
+            if result:
+                counts[result["verdict"]["verdict"]] += 1
+    finally:
+        settings.force_simulation = was_forced
+
+    return {
+        "status": "seeded",
+        "events": sum(counts.values()),
+        "verdicts": counts,
+        "ledger": await asyncio.to_thread(db.verify_chain),
+        "mode": settings.mode,
+    }
 
 
 @app.get("/api/demo/scenarios")

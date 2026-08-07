@@ -127,6 +127,13 @@ serialise through a lock so two concurrent verdicts cannot fork the chain.
 re-linking. Disputes **append** a re-audit rather than overwriting the original, so a
 reversal stays permanently visible.
 
+The payload also carries `frames_sha256` — each evidence frame hashed, then the
+concatenation hashed, so the chain commits to the frames *and* their order. Without it
+the ledger would prove only that a verdict was never altered, while the images shown
+beside it sat in a separate table, unhashed and swappable under an untouched decision.
+This is the property Rule 167A leans on: the evidence a citizen is shown is provably the
+evidence the verdict was drawn from.
+
 ---
 
 ## API
@@ -143,6 +150,7 @@ reversal stays permanently visible.
 | `GET` | `/api/architecture` | Machine-readable agent tree + thresholds |
 | `GET` | `/api/rules?q=` | Semantic search over the MV Act corpus |
 | `POST` | `/api/demo/reset` | Wipe state so a pitch can re-run from zero |
+| `POST` | `/api/demo/seed` | Replay the seed history through the pipeline — `?force=true` to reseed a non-empty ledger |
 
 Interactive docs at `/docs`.
 

@@ -96,7 +96,9 @@ local vector index and a local PII redactor serve the same interfaces.
 
 **On `/console`** — a video clip or still image from any CCTV/ANPR feed.
 
-- Formats: `mp4 · mov · avi · mkv · webm · jpg · png · webp`, max **60 MB**
+- Formats: `mp4 · mov · avi · mkv · webm · jpg · png · webp`, max **200 MB**
+- Clips longer than `EVENT_WINDOW_SECONDS` are sampled across their full duration, so a
+  long upload contributes frames from all of it rather than only its opening seconds
 - Optional: a *perception scenario* override (forces a known detector/plate result so you
   can demonstrate a specific decision boundary — the audit itself still runs for real)
 - Optional: operator note, location override

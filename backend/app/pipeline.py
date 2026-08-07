@@ -14,16 +14,19 @@ trace shape, so nothing downstream needs to know which one ran.
 from __future__ import annotations
 
 import asyncio
+import shutil
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncGenerator
 
 from . import db
 from .agents import ingest, prompts, simulator
 from .agents.adk_agents import _as_dict
-from .config import settings
+from .config import UPLOAD_DIR, settings
 from .guardrails import enkrypt
+from .retry import with_retry
 from .schemas import (
     AuditResult,
     AuditTrace,
@@ -122,7 +125,21 @@ class TraceRecorder:
 async def _run_adk(
     frames: list[dict], challan_id: str, operator_note: str, dispute_reason: str | None
 ) -> dict:
-    """Execute the ADK tree and return the final session state."""
+    """Execute the ADK tree and return the final session state.
+
+    Retried on transient Gemini failures. Each attempt builds its own session,
+    so a retry starts from the same clean initial state rather than inheriting
+    the half-populated state of the attempt that failed.
+    """
+    return await with_retry(
+        lambda: _run_adk_once(frames, challan_id, operator_note, dispute_reason),
+        label="adk-tree",
+    )
+
+
+async def _run_adk_once(
+    frames: list[dict], challan_id: str, operator_note: str, dispute_reason: str | None
+) -> dict:
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
     from google.genai import types
@@ -182,6 +199,47 @@ async def _run_adk(
 # --------------------------------------------------------------------------- #
 # Main pipeline
 # --------------------------------------------------------------------------- #
+# One audit at a time per process. A single live audit peaks around 175 MB, but
+# several running concurrently — which is what happens when an impatient user
+# retries during a slow cold-start — stack their peaks and push a 512 MB
+# instance out of memory. Serialising caps the resident footprint at one audit's
+# worth; a queued request simply waits its turn rather than piling on.
+_audit_gate = asyncio.Semaphore(1)
+
+
+def _under_upload_dir(path: Path) -> bool:
+    try:
+        return path.resolve().is_relative_to(UPLOAD_DIR.resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def _discard_workspace(source_path: str, frame_dir: Path | None) -> None:
+    """Drop an audit's scratch files once its evidence is in the database.
+
+    The evidence packet stores frames as base64 data URIs and a dispute
+    re-decides from that stored record, so neither the uploaded clip nor the
+    sampled JPEGs are ever read again after the audit finishes. Keeping them
+    was a slow leak: on a host whose filesystem is in memory — Cloud Run's is —
+    every retained upload is a permanent charge against the instance's memory
+    limit, and a handful of large clips is the entire allowance.
+
+    Only paths under `UPLOAD_DIR` are removed. An audit can also run against a
+    repo fixture (`scripts/seed_demo.py` replays `data/seed_frames/`, the demo
+    clips live in `data/demo_clips/`), and deleting those would consume the
+    demo the first time it ran.
+    """
+    if frame_dir is not None and _under_upload_dir(frame_dir):
+        shutil.rmtree(frame_dir, ignore_errors=True)
+
+    source = Path(source_path)
+    if _under_upload_dir(source):
+        try:
+            source.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 async def run_audit(
     source_path: str,
     filename: str,
@@ -192,8 +250,34 @@ async def run_audit(
     """Run the audit, yielding `{"type": ..., "data": ...}` envelopes.
 
     Envelope types: `trace` (a step changed), `result` (final AuditResult),
-    `error` (fatal).
+    `error` (fatal). Only one audit runs at a time process-wide, and the
+    audit's scratch files are discarded when it ends — including when it fails
+    part way, which is exactly when the largest uploads tend to be abandoned.
     """
+    async with _audit_gate:
+        workspace: dict[str, Any] = {}
+        try:
+            async for envelope in _run_audit_inner(
+                source_path,
+                filename,
+                operator_note,
+                scenario_override,
+                location_override,
+                workspace,
+            ):
+                yield envelope
+        finally:
+            _discard_workspace(source_path, workspace.get("frame_dir"))
+
+
+async def _run_audit_inner(
+    source_path: str,
+    filename: str,
+    operator_note: str = "",
+    scenario_override: str | None = None,
+    location_override: str | None = None,
+    workspace: dict[str, Any] | None = None,
+) -> AsyncGenerator[dict, None]:
     recorder = TraceRecorder()
     challan_id = f"CH-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     mode = settings.mode
@@ -215,6 +299,8 @@ async def run_audit(
         return
 
     frames: list[dict] = ingested["frames"]
+    if workspace is not None and frames:
+        workspace["frame_dir"] = Path(frames[0]["path"]).parent
     recorder.finish(
         "IngestAgent",
         output={
@@ -388,6 +474,16 @@ async def run_audit(
     recorder.start("LedgerAgent")
     yield {"type": "trace", "data": [s.model_dump() for s in recorder.snapshot()]}
 
+    # The evidence frames are rendered before the append, not after, because
+    # the ledger commits to their digest. Hashing them afterwards would leave
+    # the evidence outside the chain — which is the gap this closes.
+    frame_uris: list[str] = []
+    for frame in frames[:4]:
+        uri = await asyncio.to_thread(ingest.frame_to_data_uri, frame["path"])
+        if uri:
+            frame_uris.append(uri)
+    frames_sha256 = db.evidence_digest(frame_uris)
+
     ledger_payload = {
         "challan_id": challan_id,
         "event": "AUDIT",
@@ -405,6 +501,8 @@ async def run_audit(
         "fine_amount": fine_amount,
         "mode": mode,
         "reasoning": verdict.reasoning,
+        "frames_sha256": frames_sha256,
+        "frame_count": len(frame_uris),
     }
     ledger_id, ledger_hash = await asyncio.to_thread(db.append_ledger, ledger_payload)
     recorder.finish(
@@ -415,12 +513,6 @@ async def run_audit(
     yield {"type": "trace", "data": [s.model_dump() for s in recorder.snapshot()]}
 
     # -- Assemble evidence packet ------------------------------------------ #
-    frame_uris: list[str] = []
-    for frame in frames[:4]:
-        uri = await asyncio.to_thread(ingest.frame_to_data_uri, frame["path"])
-        if uri:
-            frame_uris.append(uri)
-
     if verdict.verdict == "ISSUE":
         evidence = EvidencePacket(
             challan_id=challan_id,
@@ -450,6 +542,7 @@ async def run_audit(
         evidence=evidence,
         ledger_id=ledger_id,
         ledger_hash=ledger_hash,
+        frames_sha256=frames_sha256,
         trace=recorder.snapshot(),
         naive=naive,
         created_at=_now(),

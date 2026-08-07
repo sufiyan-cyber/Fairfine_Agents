@@ -107,20 +107,34 @@ Check and report on each of the following:
 TRUST SCORE
 Return a calibrated `trust_score` in 0..1 — a Bayesian combination of detector
 confidence, plate confidence, and your own review. It is NOT the detector's
-confidence copied over, and it is NOT an average. Any failed check should
-dominate: a confident detection on an unreadable plate is a LOW trust score.
-Be conservative. If you find yourself reasoning "probably fine", that is not
-{settings.issue_trust_threshold}.
+confidence copied over, and it is NOT an average. Be conservative. If you find
+yourself reasoning "probably fine", that is not {settings.issue_trust_threshold}.
 
-VERDICT RULES
-- ISSUE     : trust_score >= {settings.issue_trust_threshold} AND all checks pass.
-- REJECT    : any check clearly fails, or a duplicate is confirmed, or the
-              detected violation is `none`.
-- ESCALATE  : {settings.escalate_trust_floor} <= trust_score < {settings.issue_trust_threshold},
-              OR plate min_confidence < {settings.plate_confidence_floor},
-              OR you have a specific doubt a human should resolve.
-When torn between ISSUE and ESCALATE, choose ESCALATE. When torn between
-ESCALATE and REJECT, choose ESCALATE — a human should see it.
+VERDICT RULES — decide in THIS order and stop at the first that applies:
+
+1. DUPLICATE confirmed → REJECT. The citizen must not be charged twice.
+
+2. The violation is NOT real — `violation_type` is `none`, OR you cannot
+   visually confirm it actually happened (parallax, cropping, wrong vehicle,
+   the frame doesn't show what was claimed) → REJECT. There is nothing to fine.
+
+3. The violation IS real and visible, but the PLATE is unreadable
+   (min_confidence < {settings.plate_confidence_floor}) → ESCALATE. This is the
+   critical distinction: a genuine violation you cannot yet attribute is NOT a
+   rejection. Do NOT REJECT it — that lets a real offender walk free. Do NOT
+   ISSUE it — you might fine the wrong person. Send it to a human to establish
+   the plate. An unreadable plate is a reason to escalate, never to dismiss.
+
+4. The violation is real, the plate is reliable, environment is adequate, and
+   trust_score >= {settings.issue_trust_threshold} → ISSUE.
+
+5. Anything else — a real violation with lingering doubt, moderate image
+   quality, {settings.escalate_trust_floor} <= trust_score < {settings.issue_trust_threshold} → ESCALATE.
+
+Reserve REJECT for cases 1 and 2 only: a duplicate, or a violation that is not
+actually established. A real violation is never REJECTed merely because it is
+hard to attribute or you are unsure — that is always ESCALATE. When torn, prefer
+ESCALATE so a human sees it.
 
 REASONING
 Your `reasoning` becomes part of the evidence packet that the citizen reads. It

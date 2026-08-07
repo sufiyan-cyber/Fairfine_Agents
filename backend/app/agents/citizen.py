@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from .. import db
 from ..config import settings
 from ..guardrails import enkrypt
+from ..retry import with_retry
 from ..schemas import (
     CitizenView,
     Detection,
@@ -56,7 +57,19 @@ def build_citizen_agent():
 
 
 async def _run_single_agent(agent, context: str, session_id: str) -> dict:
-    """Run one LlmAgent to completion and return its structured output."""
+    """Run one LlmAgent to completion and return its structured output.
+
+    Retried on transient Gemini failures — this path serves the citizen
+    explanation and the dispute re-audit, the two screens a citizen is looking
+    at when they are already unhappy.
+    """
+    return await with_retry(
+        lambda: _run_single_agent_once(agent, context, session_id),
+        label=agent.name,
+    )
+
+
+async def _run_single_agent_once(agent, context: str, session_id: str) -> dict:
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
     from google.genai import types
