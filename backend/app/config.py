@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     plate_model: str = "gemini-2.5-flash"
     auditor_model: str = "gemini-2.5-pro"
     citizen_model: str = "gemini-2.5-pro"
+    # Used only when the auditor's model is still rate-limited after retries.
+    # Vertex serves the larger models from a shared capacity pool, so a 429
+    # there means the pool is busy, not that the request is wrong. Set empty to
+    # disable and let the audit fail instead.
+    auditor_fallback_model: str = "gemini-2.5-flash"
 
     # --- Semantic memory ---
     qdrant_url: str = ""

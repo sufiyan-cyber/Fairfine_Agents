@@ -238,10 +238,10 @@ def _auditor_instruction(ctx: ReadonlyContext) -> str:
     return f"{base}\n\n{context}"
 
 
-def build_auditor_agent() -> LlmAgent:
+def build_auditor_agent(model: str | None = None) -> LlmAgent:
     return LlmAgent(
         name="AuditorAgent",
-        model=settings.auditor_model,
+        model=model or settings.auditor_model,
         description=(
             "Adversarially reviews the detection and plate read, and returns a "
             "calibrated trust score with an ISSUE / REJECT / ESCALATE verdict."
@@ -391,7 +391,7 @@ class VerdictRouter(BaseAgent):
 # --------------------------------------------------------------------------- #
 # Root
 # --------------------------------------------------------------------------- #
-def build_root_agent() -> SequentialAgent:
+def build_root_agent(auditor_model: str | None = None) -> SequentialAgent:
     perception = ParallelAgent(
         name="PerceptionStage",
         description="Runs violation detection and plate reading concurrently.",
@@ -417,7 +417,7 @@ def build_root_agent() -> SequentialAgent:
         sub_agents=[
             perception,
             MemoryAgent(name="MemoryAgent", description="Duplicate check + MV Act RAG."),
-            build_auditor_agent(),
+            build_auditor_agent(auditor_model),
             router,
         ],
         after_agent_callback=ledger_callback,
@@ -427,12 +427,23 @@ def build_root_agent() -> SequentialAgent:
 # `adk web` / `adk run` entry point.
 root_agent = None
 
+# One cached tree per auditor model. Keyed rather than single because the
+# fallback path needs a second tree: ADK fixes an LlmAgent's model at
+# construction, so serving a different model means a different tree — and
+# building one per audit leaks the Gemini connection pools this cache exists to
+# avoid in the first place.
+_root_agents: dict[str, SequentialAgent] = {}
 
-def get_root_agent() -> SequentialAgent:
+
+def get_root_agent(auditor_model: str | None = None) -> SequentialAgent:
     global root_agent
+    key = auditor_model or settings.auditor_model
+    tree = _root_agents.get(key)
+    if tree is None:
+        tree = _root_agents[key] = build_root_agent(key)
     if root_agent is None:
-        root_agent = build_root_agent()
-    return root_agent
+        root_agent = tree  # `adk web` / `adk run` entry point
+    return tree
 
 
 def describe_architecture() -> dict:

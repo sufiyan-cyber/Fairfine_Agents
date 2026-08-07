@@ -26,7 +26,7 @@ from .agents import ingest, prompts, simulator
 from .agents.adk_agents import _as_dict
 from .config import UPLOAD_DIR, settings
 from .guardrails import enkrypt
-from .retry import with_retry
+from .retry import is_retryable, with_retry
 from .schemas import (
     AuditResult,
     AuditTrace,
@@ -130,15 +130,43 @@ async def _run_adk(
     Retried on transient Gemini failures. Each attempt builds its own session,
     so a retry starts from the same clean initial state rather than inheriting
     the half-populated state of the attempt that failed.
+
+    If the auditor's model stays exhausted after those retries, the audit is
+    re-run on the fallback model rather than failed. Vertex serves the larger
+    models from a shared capacity pool, so a 429 there says the pool is busy,
+    not that anything is wrong with the request — and the smaller model applies
+    the same prompt, the same five vetoes and the same thresholds. A shallower
+    verdict is worth more than an error, and `capability_report` reports which
+    model actually answered.
     """
-    return await with_retry(
-        lambda: _run_adk_once(frames, challan_id, operator_note, dispute_reason),
-        label="adk-tree",
-    )
+    try:
+        return await with_retry(
+            lambda: _run_adk_once(frames, challan_id, operator_note, dispute_reason),
+            label=f"adk-tree[{settings.auditor_model}]",
+        )
+    except Exception as exc:  # noqa: BLE001 — re-raised below unless retryable
+        fallback = settings.auditor_fallback_model.strip()
+        if not fallback or fallback == settings.auditor_model or not is_retryable(exc):
+            raise
+        print(
+            f"[fallback] {settings.auditor_model} still exhausted after retries; "
+            f"re-running the audit on {fallback}",
+            flush=True,
+        )
+        return await with_retry(
+            lambda: _run_adk_once(
+                frames, challan_id, operator_note, dispute_reason, auditor_model=fallback
+            ),
+            label=f"adk-tree[{fallback}]",
+        )
 
 
 async def _run_adk_once(
-    frames: list[dict], challan_id: str, operator_note: str, dispute_reason: str | None
+    frames: list[dict],
+    challan_id: str,
+    operator_note: str,
+    dispute_reason: str | None,
+    auditor_model: str | None = None,
 ) -> dict:
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
@@ -180,7 +208,9 @@ async def _run_adk_once(
     # state keeps concurrent audits isolated, so a shared tree is safe — it is
     # exactly how `adk web`/`adk api_server` run.
     runner = Runner(
-        app_name=app_name, agent=get_root_agent(), session_service=session_service
+        app_name=app_name,
+        agent=get_root_agent(auditor_model),
+        session_service=session_service,
     )
 
     async for _event in runner.run_async(

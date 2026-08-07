@@ -25,11 +25,13 @@ T = TypeVar("T")
 RETRYABLE_CODES = {429, 500, 503}
 RETRYABLE_STATUSES = {"RESOURCE_EXHAUSTED", "UNAVAILABLE", "INTERNAL"}
 
-MAX_ATTEMPTS = 3
-# A cap on cumulative sleeping. A 429 can mean "you are out of quota for the
-# day", which no amount of waiting fixes — better to fail while someone is
-# still looking at the screen than to hang for a minute first.
-MAX_TOTAL_WAIT_SECONDS = 30.0
+MAX_ATTEMPTS = 4
+# A cap on cumulative sleeping. Vertex serves the larger models from a shared
+# capacity pool, and pressure on it lasts tens of seconds — 30s of patience
+# gave up while the pool was still busy. A demo would rather wait a little
+# longer than show an error, but not so long that the page looks hung, and the
+# caller falls back to a smaller model once this is exhausted.
+MAX_TOTAL_WAIT_SECONDS = 60.0
 
 
 def _causes(exc: BaseException):
@@ -42,7 +44,7 @@ def _causes(exc: BaseException):
         current = current.__cause__ or current.__context__
 
 
-def _is_retryable(exc: BaseException) -> bool:
+def is_retryable(exc: BaseException) -> bool:
     for err in _causes(exc):
         code = getattr(err, "code", None)
         if isinstance(code, int) and code in RETRYABLE_CODES:
@@ -86,7 +88,7 @@ async def with_retry(
         try:
             return await call()
         except Exception as exc:  # noqa: BLE001 — non-retryable is re-raised below
-            if attempt == MAX_ATTEMPTS or not _is_retryable(exc):
+            if attempt == MAX_ATTEMPTS or not is_retryable(exc):
                 raise
 
             delay = _server_retry_delay(exc)
@@ -125,7 +127,7 @@ def with_retry_sync(call: Callable[[], T], *, label: str = "gemini") -> T:
         try:
             return call()
         except Exception as exc:  # noqa: BLE001 — non-retryable is re-raised below
-            if attempt == MAX_ATTEMPTS or not _is_retryable(exc):
+            if attempt == MAX_ATTEMPTS or not is_retryable(exc):
                 raise
 
             delay = _server_retry_delay(exc)
