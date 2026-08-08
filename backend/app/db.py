@@ -90,13 +90,14 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             challan_id     TEXT PRIMARY KEY,
             verdict        TEXT NOT NULL,
             trust_score    REAL NOT NULL,
-            violation_type TEXT NOT NULL,
-            plate          TEXT NOT NULL,
-            location       TEXT NOT NULL,
-            area           TEXT NOT NULL DEFAULT 'unknown',
-            vehicle_type   TEXT NOT NULL DEFAULT 'unknown',
-            camera_id      TEXT NOT NULL DEFAULT '',
+            fraud_type     TEXT NOT NULL,
+            account_ref    TEXT NOT NULL,
+            merchant       TEXT NOT NULL,
+            region         TEXT NOT NULL DEFAULT 'unknown',
+            segment        TEXT NOT NULL DEFAULT 'unknown',
+            channel        TEXT NOT NULL DEFAULT '',
             event_ts       TEXT NOT NULL,
+            amount_held    REAL NOT NULL DEFAULT 0,
             ledger_id      TEXT NOT NULL DEFAULT '',
             ledger_hash    TEXT NOT NULL DEFAULT '',
             result_json    TEXT NOT NULL,
@@ -130,7 +131,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         );
 
         CREATE INDEX IF NOT EXISTS idx_challans_created ON challans(created_at);
-        CREATE INDEX IF NOT EXISTS idx_challans_plate   ON challans(plate);
+        CREATE INDEX IF NOT EXISTS idx_challans_account ON challans(account_ref);
         CREATE INDEX IF NOT EXISTS idx_ledger_ts        ON ledger(ts);
         """
     )
@@ -269,22 +270,23 @@ def save_challan(record: dict) -> None:
         conn.execute(
             """
             INSERT OR REPLACE INTO challans (
-                challan_id, verdict, trust_score, violation_type, plate, location,
-                area, vehicle_type, camera_id, event_ts, ledger_id, ledger_hash,
+                challan_id, verdict, trust_score, fraud_type, account_ref, merchant,
+                region, segment, channel, event_ts, amount_held, ledger_id, ledger_hash,
                 result_json, created_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 record["challan_id"],
                 record["verdict"],
                 record["trust_score"],
-                record["violation_type"],
-                record["plate"],
-                record["location"],
-                record.get("area", "unknown"),
-                record.get("vehicle_type", "unknown"),
-                record.get("camera_id", ""),
+                record["fraud_type"],
+                record["account_ref"],
+                record["merchant"],
+                record.get("region", "unknown"),
+                record.get("segment", "unknown"),
+                record.get("channel", ""),
                 record["event_ts"],
+                record.get("amount_held", 0.0),
                 record.get("ledger_id", ""),
                 record.get("ledger_hash", ""),
                 canonical_json(record["result"]),
@@ -326,27 +328,30 @@ def list_challans(limit: int = 100, verdict: str | None = None) -> list[dict]:
     return out
 
 
-def recent_events_for_dedup(plate: str, location: str, window_seconds: int) -> list[dict]:
-    """Candidate near-duplicates: same plate, recent. Location match is scored
-    by the caller rather than filtered here, since junction naming varies."""
+def recent_events_for_dedup(
+    account_ref: str, merchant: str, window_seconds: int
+) -> list[dict]:
+    """Candidate near-duplicates: same account, recent. The merchant match is
+    scored by the caller rather than filtered here, since merchant descriptors
+    vary between acquirers for the same shop."""
     conn = get_conn()
     with _lock:
         rows = conn.execute(
-            "SELECT * FROM challans WHERE plate = ? ORDER BY created_at DESC LIMIT 25",
-            (plate,),
+            "SELECT * FROM challans WHERE account_ref = ? ORDER BY created_at DESC LIMIT 25",
+            (account_ref,),
         ).fetchall()
 
     matches = []
     for row in rows:
         data = dict(row)
         blob = data.pop("result_json", None)
-        # Carry the detector's description forward so the semantic comparison
-        # is made against like text on both sides.
+        # Carry the signal's evidence summary forward so the semantic
+        # comparison is made against like text on both sides.
         data["description"] = ""
         if blob:
             try:
                 data["description"] = (
-                    json.loads(blob).get("detection", {}).get("region_description", "")
+                    json.loads(blob).get("signal", {}).get("evidence_summary", "")
                 )
             except (json.JSONDecodeError, AttributeError):
                 pass

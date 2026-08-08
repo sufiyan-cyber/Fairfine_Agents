@@ -26,49 +26,42 @@ import asyncio
 import sys
 from pathlib import Path
 
-import cv2
-import numpy as np
-
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app import db, pipeline  # noqa: E402
 from app.config import DATA_DIR  # noqa: E402
+from app.tools.case_builder import write_case  # noqa: E402
 
-SEED_DIR = DATA_DIR / "seed_frames"
+SEED_DIR = DATA_DIR / "seed_cases"
 
-# (scenario hint, junction slug, camera, timestamp) — spread across areas,
-# vehicle classes and hours so the dashboard has something to disaggregate.
+# (scenario hint, city slug, masked account, timestamp) — spread across
+# regions, customer segments and hours so the dashboard has something to
+# disaggregate. The account reference drives the segment, so repeating one
+# keeps the same customer.
 SEED_EVENTS = [
-    ("clean_helmet", "hsr", "CAM-KA05-014", "2026-07-21T08-15-02"),
-    ("clean_helmet", "koramangala", "CAM-KA05-031", "2026-07-21T09-41-18"),
-    ("occluded_plate", "silk", "CAM-KA51-008", "2026-07-21T09-58-44"),
-    ("parallax_redlight", "indiranagar", "CAM-KA03-021", "2026-07-21T11-05-12"),
-    ("triple_riding", "tnagar", "CAM-TN09-003", "2026-07-21T13-22-40"),
-    ("phone_use", "mgroad", "CAM-KA01-007", "2026-07-21T14-47-55"),
-    ("night_glare", "whitefield", "CAM-KA53-019", "2026-07-21T21-33-09"),
-    ("clean_helmet", "hsr", "CAM-KA05-014", "2026-07-22T08-02-31"),
-    ("parallax_redlight", "silk", "CAM-KA51-011", "2026-07-22T10-17-06"),
-    ("occluded_plate", "koramangala", "CAM-KA05-033", "2026-07-22T12-40-27"),
-    ("empty_clear", "mgroad", "CAM-KA01-007", "2026-07-22T15-01-49"),
-    ("triple_riding", "whitefield", "CAM-KA53-022", "2026-07-22T17-28-14"),
-    ("phone_use", "anna", "CAM-TN01-005", "2026-07-22T18-52-03"),
-    ("night_glare", "indiranagar", "CAM-KA03-024", "2026-07-22T22-11-38"),
-    ("clean_helmet", "tnagar", "CAM-TN09-006", "2026-07-23T07-44-51"),
-    ("occluded_plate", "hsr", "CAM-KA05-016", "2026-07-23T11-09-22"),
+    ("card_testing", "hsr", "4532111122224821", "2026-07-21T08:15:02"),
+    ("clean", "koramangala", "4532111122223190", "2026-07-21T09:41:18"),
+    ("firsttime", "silk", "5241333344445508", "2026-07-21T09:58:44"),
+    ("traveller", "indiranagar", "4532111122226021", "2026-07-21T11:05:12"),
+    ("takeover", "tnagar", "6011555566667703", "2026-07-21T13:22:40"),
+    ("salary", "mgroad", "4532111122227007", "2026-07-21T14:47:55"),
+    ("thin", "whitefield", "5241333344449019", "2026-07-21T21:33:09"),
+    ("card_testing", "hsr", "4532111122224821", "2026-07-22T08:02:31"),
+    ("traveller", "silk", "4532111122221106", "2026-07-22T10:17:06"),
+    ("firsttime", "koramangala", "5241333344443033", "2026-07-22T12:40:27"),
+    ("clean", "mgroad", "4532111122227007", "2026-07-22T15:01:49"),
+    ("takeover", "whitefield", "6011555566662214", "2026-07-22T17:28:14"),
+    ("salary", "anna", "4532111122225005", "2026-07-22T18:52:03"),
+    ("thin", "indiranagar", "5241333344442438", "2026-07-22T22:11:38"),
+    ("card_testing", "tnagar", "6011555566666051", "2026-07-23T07:44:51"),
+    ("firsttime", "hsr", "4532111122221622", "2026-07-23T11:09:22"),
 ]
 
 
-def _still(path: Path, label: str) -> None:
-    """A placeholder still. The scenario is carried by the filename; in
-    simulation mode perception is deterministic, so the pixels only need to be
-    a decodable frame of the right shape."""
-    frame = np.full((720, 1280, 3), 52, dtype=np.uint8)
-    cv2.rectangle(frame, (0, 430), (1280, 720), (62, 62, 66), -1)
-    cv2.line(frame, (0, 470), (1280, 470), (210, 210, 214), 4)
-    cv2.putText(frame, "SYNTHETIC SEED FRAME", (40, 90), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (150, 190, 240), 2, cv2.LINE_AA)
-    cv2.putText(frame, label, (40, 145), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 205), 2, cv2.LINE_AA)
-    cv2.imwrite(str(path), frame)
+def _case(path: Path, scenario: str, junction: str, account: str, ts: str) -> None:
+    """Write the alert case file the pipeline will ingest."""
+    write_case(path, scenario, junction, account, ts)
 
 
 async def _run_one(path: Path, filename: str) -> dict | None:
@@ -85,10 +78,13 @@ async def main(force_live: bool = False) -> int:
     from app.config import settings
 
     if not force_live and settings.live_llm:
-        # Blank the key on the shared settings singleton for this process only.
-        # Every downstream check (`pipeline`, `memory.embed`) reads the same
-        # object, so the whole run — including embeddings — stays local.
-        settings.gemini_api_key = ""
+        # Force simulation on the shared settings singleton for this process
+        # only. Every downstream check (`pipeline`, `memory.embed`) reads the
+        # same object, so the whole run — including embeddings — stays local.
+        # `force_simulation` rather than blanking the key: on the Vertex path
+        # there is no key to blank, and clearing it left the seed running
+        # sixteen live audits against real quota.
+        settings.force_simulation = True
         print("Seeding in SIMULATION to preserve your Gemini quota.")
         print("Pass --live to seed with real inference instead.\n")
 
@@ -98,10 +94,10 @@ async def main(force_live: bool = False) -> int:
     print(f"Seeding FairFine with real pipeline runs (mode: {settings.mode})\n")
     counts = {"ISSUE": 0, "REJECT": 0, "ESCALATE": 0}
 
-    for scenario, junction, camera, ts in SEED_EVENTS:
-        filename = f"{scenario}_{camera}_{junction}_{ts}.jpg"
+    for scenario, junction, account, ts in SEED_EVENTS:
+        filename = f"{scenario}_{junction}_{ts.replace(':', '-')}.json"
         path = SEED_DIR / filename
-        _still(path, f"{scenario} @ {junction} {ts}")
+        _case(path, scenario, junction, account, ts)
         result = await _run_one(path, filename)
         if not result:
             continue
@@ -109,15 +105,16 @@ async def main(force_live: bool = False) -> int:
         counts[verdict] += 1
         trust = result["verdict"]["trust_score"]
         print(
-            f"  {verdict:<9} trust {trust:>5.0%}  {result['plate']['plate']:<12} "
+            f"  {verdict:<9} trust {trust:>5.0%}  "
+            f"{result['attribution']['account_ref']:<12} "
             f"{junction:<13} {result['challan_id']}"
         )
 
-    # Duplicate demonstration — same clip, same event window, fed twice.
-    print("\nDuplicate check: re-submitting an identical event…")
-    dup_name = "clean_helmet_CAM-KA05-014_hsr_2026-07-23T19-30-00.jpg"
+    # Duplicate demonstration — same alert, same window, fed twice.
+    print("\nDuplicate check: re-submitting an identical alert…")
+    dup_name = "card_testing_hsr_2026-07-23T19-30-00.json"
     dup_path = SEED_DIR / dup_name
-    _still(dup_path, "duplicate probe")
+    _case(dup_path, "card_testing", "hsr", "4532111122224821", "2026-07-23T19:30:00")
     first = await _run_one(dup_path, dup_name)
     second = await _run_one(dup_path, dup_name)
     for tag, res in (("first ", first), ("second", second)):
@@ -136,7 +133,7 @@ async def main(force_live: bool = False) -> int:
     print(f"  ESCALATE:             {counts['ESCALATE']}")
     print(f"  REJECT:               {counts['REJECT']}")
     prevented = counts["ESCALATE"] + counts["REJECT"]
-    print(f"  Fines prevented:      {prevented} ({prevented / total:.0%})" if total else "")
+    print(f"  Blocks prevented:     {prevented} ({prevented / total:.0%})" if total else "")
     print(f"\n  Ledger valid:         {verification['valid']}")
     print(f"  Records checked:      {verification['records_checked']}")
     print(f"  Head hash:            {str(verification['head_hash'])[:32]}…")

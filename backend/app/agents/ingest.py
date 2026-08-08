@@ -193,7 +193,25 @@ def ingest_case(
         "flagged_index": flagged_index,
         "history_count": len(history),
         "alert_rule": str(payload.get("alert_rule") or payload.get("rule") or ""),
+        # The upstream model's score. This is what a threshold-only engine acts
+        # on, so it is the honest baseline for the naive comparison — not our
+        # own perception stage, which has already done the work we are claiming
+        # credit for.
+        "alert_score": _coerce_score(payload.get("alert_score")),
     }
+
+
+def _coerce_score(value) -> float:
+    """The upstream score, defaulting to a confident alert when absent.
+
+    An alert with no score attached still fired, so treating it as low-risk
+    would understate what the existing system would have done.
+    """
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.90
+    return round(min(max(score, 0.0), 1.0), 3)
 
 
 def events_to_text(events: list[dict], flagged_index: int = 0) -> str:

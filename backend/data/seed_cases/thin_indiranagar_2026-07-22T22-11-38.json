@@ -1,0 +1,48 @@
+{
+  "case_ref": "ALERT-872297",
+  "account_ref": "5241333344442438",
+  "alert_rule": "AMOUNT_OUT_OF_PROFILE",
+  "alert_score": 0.83,
+  "flagged_transaction": {
+    "ts": "2026-07-22T22:11:38.000+00:00",
+    "amount": 12400.0,
+    "currency": "INR",
+    "merchant": "Reliance Digital",
+    "category": "electronics",
+    "channel": "ecom",
+    "device_id": "dev_home_01",
+    "city": "Bengaluru",
+    "country": "IN",
+    "status": "approved",
+    "flagged": true
+  },
+  "recent_activity": [
+    {
+      "ts": "2026-07-20T13:21:38.000+00:00",
+      "amount": 266,
+      "currency": "INR",
+      "merchant": "CTR Malleshwaram",
+      "category": "restaurant",
+      "channel": "card_present",
+      "device_id": "dev_home_01",
+      "city": "Bengaluru",
+      "country": "IN",
+      "status": "approved",
+      "flagged": false
+    },
+    {
+      "ts": "2026-07-21T08:42:38.000+00:00",
+      "amount": 1212,
+      "currency": "INR",
+      "merchant": "HP Petro Stop",
+      "category": "fuel",
+      "channel": "card_present",
+      "device_id": "dev_home_01",
+      "city": "Bengaluru",
+      "country": "IN",
+      "status": "approved",
+      "flagged": false
+    }
+  ],
+  "disclaimer": "Synthetic case file. No real cardholder or merchant data."
+}

@@ -1,10 +1,12 @@
 """Bias dashboard aggregation.
 
 The metric that matters is `false_positive_rate`: the share of AI-flagged
-events that the auditor stopped before a citizen was charged. A high rate for
-one area or vehicle class is not a compliment to the auditor — it is a signal
-that the upstream detector performs worse there, which is exactly the kind of
-disparity automated enforcement tends to hide.
+alerts that the auditor stopped before a customer was blocked. A high rate for
+one region or customer segment is not a compliment to the auditor — it is a
+signal that the upstream model performs worse there, which is exactly the kind
+of disparity a fraud engine tends to hide. A student account blocked at three
+times the rate of a salaried one is a fairness defect, and nobody sees it
+unless someone measures it.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from datetime import datetime
 
 from . import db
 from .schemas import BiasDashboard, BiasSlice
-from .tools import mv_act
+from .tools import accounts, fraud_rules
 
 
 def _slice(key: str, rows: list[dict]) -> BiasSlice:
@@ -89,12 +91,24 @@ def build_dashboard(limit: int = 1000) -> BiasDashboard:
         issued=issued,
         rejected=rejected,
         escalated=escalated,
-        wrongful_fines_prevented=prevented,
+        wrongful_blocks_prevented=prevented,
         prevention_rate=round(prevented / total, 4) if total else 0.0,
-        by_area=_group(rows, lambda r: r.get("area") or "unknown"),
-        by_vehicle_type=_group(rows, lambda r: r.get("vehicle_type") or "unknown"),
-        by_violation_type=_group(
-            rows, lambda r: mv_act.label_for(r.get("violation_type", "none"))
+        # Money left in customers' hands: what a threshold-only engine would
+        # have held on every alert this auditor stopped.
+        amount_protected=round(
+            sum(
+                float(r.get("result", {}).get("flagged_amount", 0) or 0)
+                for r in rows
+                if r["verdict"] in {"REJECT", "ESCALATE"}
+            ),
+            2,
+        ),
+        by_region=_group(rows, lambda r: r.get("region") or "unknown"),
+        by_segment=_group(
+            rows, lambda r: accounts.segment_label(r.get("segment") or "unknown")
+        ),
+        by_fraud_type=_group(
+            rows, lambda r: fraud_rules.label_for(r.get("fraud_type", "none"))
         ),
         by_hour=by_hour,
         over_time=over_time,

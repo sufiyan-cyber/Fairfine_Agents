@@ -130,9 +130,14 @@ def check_bias(text: str) -> GuardrailResult:
 
 
 def scrub_owner_record(record: dict) -> dict:
-    """Strip a registry record down to what an audit decision legitimately
-    needs. Owner identity is never a valid input to whether a violation
-    occurred, so it is dropped before the prompt is built — not merely masked.
+    """Strip an account record down to what an audit decision legitimately
+    needs. Customer identity is never a valid input to whether a transaction
+    was unauthorised, so it is dropped before the prompt is built — not merely
+    masked.
+
+    Note what survives: tenure, prior confirmed fraud, prior *wrongful* blocks
+    and a travel notice are all legitimate evidence about the account. The
+    person's name is not.
     """
     safe = {
         k: v
@@ -140,16 +145,19 @@ def scrub_owner_record(record: dict) -> dict:
         if k
         in {
             "found",
-            "plate",
-            "vehicle_type",
-            "vehicle_make",
-            "registration_year",
-            "rto",
-            "insurance_valid",
+            "account_ref",
+            "segment",
+            "segment_label",
+            "tenure_years",
+            "prior_confirmed_fraud",
+            "prior_disputes_12mo",
+            "prior_false_positive_blocks_12mo",
+            "travel_notice_on_file",
+            "issuing_branch",
             "source",
         }
     }
-    safe["owner"] = "[WITHHELD_FROM_MODEL]"
+    safe["customer"] = "[WITHHELD_FROM_MODEL]"
     return safe
 
 

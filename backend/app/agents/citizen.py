@@ -18,14 +18,14 @@ from ..config import settings
 from ..guardrails import enkrypt
 from ..retry import with_retry
 from ..schemas import (
+    AttributionRead,
     CitizenView,
-    Detection,
     DisputeOutcome,
     DuplicateCheck,
-    PlateRead,
+    RiskSignal,
     Verdict,
 )
-from ..tools import mv_act
+from ..tools import fraud_rules
 from ..tools.memory import memory
 from . import prompts, simulator
 from .adk_agents import _as_dict, pii_scrub_callback
@@ -104,11 +104,11 @@ async def explain(challan_id: str, language: str = "en") -> CitizenView | None:
 
     result = record["result"]
     verdict = _as_dict(result.get("verdict"))
-    detection = _as_dict(result.get("detection"))
-    plate = _as_dict(result.get("plate"))
+    signal = _as_dict(result.get("signal"))
+    attribution = _as_dict(result.get("attribution"))
     rule = _as_dict(result.get("rule"))
-    registry = result.get("registry", {}) or {}
-    fine_amount = int(result.get("fine_amount", 0) or 0)
+    account = result.get("account", {}) or {}
+    amount_held = float(result.get("amount_held", 0) or 0)
     verdict_type = verdict.get("verdict", "ESCALATE")
 
     disputes = await asyncio.to_thread(db.get_disputes, challan_id)
@@ -124,11 +124,11 @@ async def explain(challan_id: str, language: str = "en") -> CitizenView | None:
     packet = {
         "verdict": verdict_type,
         "trust_score": verdict.get("trust_score", 0.0),
-        "violation_label": mv_act.label_for(detection.get("violation_type", "none")),
-        "plate": plate.get("plate", ""),
-        "location": record["location"],
+        "fraud_label": fraud_rules.label_for(signal.get("fraud_type", "none")),
+        "account_ref": attribution.get("account_ref", ""),
+        "merchant": record["merchant"],
         "ts": record["event_ts"],
-        "fine_amount": fine_amount,
+        "amount_held": amount_held,
         "reasoning": verdict.get("reasoning", ""),
         "checks": verdict.get("checks", {}),
         "ledger_hash": record["ledger_hash"],
@@ -149,8 +149,8 @@ async def explain(challan_id: str, language: str = "en") -> CitizenView | None:
         written = simulator.citizen_view(
             verdict=verdict_type,
             language=language,
-            fine_amount=fine_amount,
-            plate=plate.get("plate", ""),
+            amount_held=amount_held,
+            account_ref=attribution.get("account_ref", ""),
             reasoning_en=verdict.get("reasoning", ""),
         )
 
@@ -161,20 +161,20 @@ async def explain(challan_id: str, language: str = "en") -> CitizenView | None:
         explanation=written.get("explanation", ""),
         what_this_means=written.get("what_this_means", ""),
         your_options=written.get("your_options", []),
-        violation_label=packet["violation_label"],
+        fraud_label=packet["fraud_label"],
         trust_score=float(packet["trust_score"]),
         verdict=verdict_type,  # type: ignore[arg-type]
-        plate=packet["plate"],
-        owner_masked=registry.get("owner_masked", "—"),
-        location=packet["location"],
+        account_ref=packet["account_ref"],
+        customer_masked=account.get("customer_masked", "—"),
+        merchant=packet["merchant"],
         ts=packet["ts"],
         rule_citation=rule.get("section", "") if rule else "",
         rule_text=rule.get("text", "") if rule else "",
         auditor_reasoning=verdict.get("reasoning", ""),
         checks=verdict.get("checks", {}),  # type: ignore[arg-type]
-        frames=result.get("frame_uris", [])[:3],
+        events=result.get("events", []),
         ledger_hash=record["ledger_hash"],
-        fine_amount=fine_amount,
+        amount_held=amount_held,
         disputable=verdict_type in {"ISSUE", "ESCALATE"},
         dispute_status=dispute_status,
     )
@@ -190,17 +190,17 @@ async def reaudit(challan_id: str, reason: str) -> DisputeOutcome | None:
         return None
 
     result = record["result"]
-    detection = Detection(**_as_dict(result.get("detection")))
-    plate = PlateRead(**_as_dict(result.get("plate")))
+    signal = RiskSignal(**_as_dict(result.get("signal")))
+    attribution = AttributionRead(**_as_dict(result.get("attribution")))
     duplicate = DuplicateCheck(**_as_dict(result.get("duplicate")))
     original = _as_dict(result.get("verdict"))
     original_verdict = original.get("verdict", "ESCALATE")
-    rule = memory.rule_for_violation(detection.violation_type)
+    rule = memory.rule_for_fraud_type(signal.fraud_type)
     scenario = result.get("scenario", "clean")
 
-    # The citizen's words go into a prompt — scrub before assembly, per the
+    # The customer's words go into a prompt — scrub before assembly, per the
     # PRD's non-negotiable. Redacting here also protects the disputant if they
-    # paste a phone number or Aadhaar into the free-text box.
+    # paste a card number or Aadhaar into the free-text box.
     guarded = enkrypt.redact_pii(reason)
     safe_reason = guarded.text
 
@@ -209,19 +209,20 @@ async def reaudit(challan_id: str, reason: str) -> DisputeOutcome | None:
         try:
             from google.adk.agents import LlmAgent
 
-            frames = result.get("frames", [])
             context = prompts.build_auditor_context(
-                detection=detection.model_dump(),
-                plate=plate.model_dump(),
+                signal=signal.model_dump(),
+                attribution=attribution.model_dump(),
                 duplicate=duplicate.model_dump(),
                 rule=rule.model_dump() if rule else None,
-                frames=frames,
+                events=result.get("events", []),
+                account=result.get("account") or None,
+                merchant=result.get("merchant_profile") or None,
                 dispute_reason=safe_reason,
             )
             agent = LlmAgent(
                 name="ReAuditAgent",
                 model=settings.auditor_model,
-                description="Re-decides a contested enforcement decision.",
+                description="Re-decides a contested fraud decision.",
                 instruction=f"{prompts.REAUDIT_PROMPT}\n\n{context}",
                 output_schema=Verdict,
                 output_key="verdict",
@@ -238,8 +239,8 @@ async def reaudit(challan_id: str, reason: str) -> DisputeOutcome | None:
     if new_verdict is None:
         new_verdict = simulator.audit(
             scenario,
-            detection,
-            plate,
+            signal,
+            attribution,
             duplicate,
             rule.section if rule else None,
             dispute_reason=safe_reason,
@@ -274,7 +275,7 @@ async def reaudit(challan_id: str, reason: str) -> DisputeOutcome | None:
         "reason_redacted": safe_reason[:500],
     }
     if new_verdict.verdict != "ISSUE":
-        updated["fine_amount"] = 0
+        updated["amount_held"] = 0.0
     await asyncio.to_thread(
         db.update_challan_verdict,
         challan_id,
@@ -287,7 +288,7 @@ async def reaudit(challan_id: str, reason: str) -> DisputeOutcome | None:
         await asyncio.to_thread(
             db.enqueue_review,
             challan_id,
-            f"Citizen dispute: {safe_reason[:300]}\n\n{new_verdict.reasoning}",
+            f"Customer dispute: {safe_reason[:300]}\n\n{new_verdict.reasoning}",
             new_verdict.trust_score,
         )
 

@@ -28,30 +28,32 @@ from .config import UPLOAD_DIR, settings
 from .guardrails import enkrypt
 from .retry import is_retryable, with_retry
 from .schemas import (
+    AttributionRead,
     AuditResult,
     AuditTrace,
-    Detection,
     DuplicateCheck,
     EvidencePacket,
-    Frame,
     NaiveComparison,
-    PlateRead,
+    RiskSignal,
     RuleCitation,
+    TxnEvent,
     Verdict,
 )
-from .tools import mv_act
+from .tools import fraud_rules
+from .tools.accounts import account_lookup, infer_segment, merchant_profile
 from .tools.memory import memory
-from .tools.vahan import infer_vehicle_type, vahan_lookup
 
 STAGES: list[tuple[str, str]] = [
-    ("IngestAgent", "Sampling frames + metadata"),
-    ("DetectorAgent", "Classifying violation"),
-    ("PlateAgent", "Reading plate + per-char confidence"),
-    ("MemoryAgent", "Duplicate sweep + MV Act retrieval"),
+    ("IngestAgent", "Parsing alert + account history"),
+    ("SignalAgent", "Classifying fraud pattern"),
+    ("AttributionAgent", "Scoring attribution confidence"),
+    ("MemoryAgent", "Duplicate sweep + rulebook retrieval"),
     ("AuditorAgent", "Adversarial review"),
     ("VerdictRouter", "Routing on verdict"),
     ("LedgerAgent", "Appending to hash chain"),
 ]
+
+_MODEL_STAGES = ("SignalAgent", "AttributionAgent", "MemoryAgent", "AuditorAgent")
 
 
 def _now() -> str:
@@ -123,7 +125,13 @@ class TraceRecorder:
 # Live path — ADK
 # --------------------------------------------------------------------------- #
 async def _run_adk(
-    frames: list[dict], challan_id: str, operator_note: str, dispute_reason: str | None
+    events: list[dict],
+    challan_id: str,
+    operator_note: str,
+    dispute_reason: str | None,
+    ingested: dict | None = None,
+    account: dict | None = None,
+    merchant: dict | None = None,
 ) -> dict:
     """Execute the ADK tree and return the final session state.
 
@@ -135,7 +143,7 @@ async def _run_adk(
     a fallback ladder rather than failed. A 429 says a capacity pool is busy,
     not that anything is wrong with the request, and the pools are separate
     along two axes: *regions* don't share capacity (measured 2026-08-07, the
-    `global` endpoint refused every frames-attached request while asia-south1,
+    `global` endpoint refused every image-bearing request while asia-south1,
     us-central1 and europe-west4 all served the identical payload), and neither
     do *models*. So the ladder tries the same model in the fallback region
     before it downgrades the model at all: same verdict quality in a different
@@ -172,12 +180,15 @@ async def _run_adk(
         try:
             return await with_retry(
                 lambda model=model, location=location: _run_adk_once(
-                    frames,
+                    events,
                     challan_id,
                     operator_note,
                     dispute_reason,
                     auditor_model=model,
                     location=location,
+                    ingested=ingested,
+                    account=account,
+                    merchant=merchant,
                 ),
                 label=f"adk-tree[{model}@{region}]",
             )
@@ -191,12 +202,15 @@ async def _run_adk(
 
 
 async def _run_adk_once(
-    frames: list[dict],
+    events: list[dict],
     challan_id: str,
     operator_note: str,
     dispute_reason: str | None,
     auditor_model: str | None = None,
     location: str | None = None,
+    ingested: dict | None = None,
+    account: dict | None = None,
+    merchant: dict | None = None,
 ) -> dict:
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
@@ -206,13 +220,20 @@ async def _run_adk_once(
 
     session_service = InMemorySessionService()
     app_name = "fairfine"
-    user_id = "officer"
+    user_id = "analyst"
     session_id = challan_id
 
+    ingested = ingested or {}
+    flagged_index = ingested.get("flagged_index", 0)
+
     initial_state: dict[str, Any] = {
-        "frames": frames,
+        "events": events,
         "challan_id": challan_id,
         "operator_note": operator_note,
+        "account_ref": ingested.get("account_ref", "UNRESOLVED"),
+        "account": account or {},
+        "merchant": merchant or {},
+        "alert_rule": ingested.get("alert_rule", ""),
     }
     if dispute_reason:
         initial_state["dispute_reason"] = dispute_reason
@@ -221,16 +242,17 @@ async def _run_adk_once(
         app_name=app_name, user_id=user_id, session_id=session_id, state=initial_state
     )
 
-    parts = []
-    for frame in frames:
-        try:
-            data, mime = ingest.frame_to_part(frame["path"])
-            parts.append(types.Part.from_bytes(data=data, mime_type=mime))
-        except OSError:
-            continue
-    parts.append(
-        types.Part(text=prompts.build_detector_context(frames, operator_note))
-    )
+    parts = [
+        types.Part(
+            text=prompts.build_signal_context(
+                events,
+                flagged_index=flagged_index,
+                alert_rule=ingested.get("alert_rule", ""),
+                analyst_note=operator_note,
+                account=account,
+            )
+        )
+    ]
 
     # Reuse the one agent tree across audits. Building a fresh tree per audit
     # (as this did) makes ADK construct new internal Gemini clients each time,
@@ -274,24 +296,19 @@ def _under_upload_dir(path: Path) -> bool:
         return False
 
 
-def _discard_workspace(source_path: str, frame_dir: Path | None) -> None:
-    """Drop an audit's scratch files once its evidence is in the database.
+def _discard_workspace(source_path: str, _unused: Path | None = None) -> None:
+    """Drop an audit's uploaded case file once its evidence is in the database.
 
-    The evidence packet stores frames as base64 data URIs and a dispute
-    re-decides from that stored record, so neither the uploaded clip nor the
-    sampled JPEGs are ever read again after the audit finishes. Keeping them
-    was a slow leak: on a host whose filesystem is in memory — Cloud Run's is —
-    every retained upload is a permanent charge against the instance's memory
-    limit, and a handful of large clips is the entire allowance.
+    The stored result carries the parsed events and a dispute re-decides from
+    that record, so the uploaded JSON is never read again after the audit
+    finishes. Keeping it is a slow leak: on a host whose filesystem is in
+    memory — Cloud Run's is — every retained upload is a permanent charge
+    against the instance's memory limit.
 
     Only paths under `UPLOAD_DIR` are removed. An audit can also run against a
-    repo fixture (`scripts/seed_demo.py` replays `data/seed_frames/`, the demo
-    clips live in `data/demo_clips/`), and deleting those would consume the
+    repo fixture (`data/demo_cases/`), and deleting those would consume the
     demo the first time it ran.
     """
-    if frame_dir is not None and _under_upload_dir(frame_dir):
-        shutil.rmtree(frame_dir, ignore_errors=True)
-
     source = Path(source_path)
     if _under_upload_dir(source):
         try:
@@ -305,7 +322,7 @@ async def run_audit(
     filename: str,
     operator_note: str = "",
     scenario_override: str | None = None,
-    location_override: str | None = None,
+    account_override: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Run the audit, yielding `{"type": ..., "data": ...}` envelopes.
 
@@ -322,12 +339,12 @@ async def run_audit(
                 filename,
                 operator_note,
                 scenario_override,
-                location_override,
+                account_override,
                 workspace,
             ):
                 yield envelope
         finally:
-            _discard_workspace(source_path, workspace.get("frame_dir"))
+            _discard_workspace(source_path)
 
 
 async def _run_audit_inner(
@@ -335,7 +352,7 @@ async def _run_audit_inner(
     filename: str,
     operator_note: str = "",
     scenario_override: str | None = None,
-    location_override: str | None = None,
+    account_override: str | None = None,
     workspace: dict[str, Any] | None = None,
 ) -> AsyncGenerator[dict, None]:
     recorder = TraceRecorder()
@@ -350,7 +367,7 @@ async def _run_audit_inner(
     yield {"type": "trace", "data": [s.model_dump() for s in recorder.snapshot()]}
     try:
         ingested = await asyncio.to_thread(
-            ingest.ingest_event, source_path, settings.event_window_seconds, location_override
+            ingest.ingest_case, source_path, settings.events_per_case, account_override
         )
     except (FileNotFoundError, ValueError) as exc:
         recorder.finish("IngestAgent", detail=str(exc), status="error")
@@ -358,19 +375,23 @@ async def _run_audit_inner(
         yield {"type": "error", "data": {"message": str(exc)}}
         return
 
-    frames: list[dict] = ingested["frames"]
-    if workspace is not None and frames:
-        workspace["frame_dir"] = Path(frames[0]["path"]).parent
+    events: list[dict] = ingested["events"]
+    flagged = next((e for e in events if e.get("is_flagged")), events[0])
+    account_ref = ingested["account_ref"]
+    account = await asyncio.to_thread(account_lookup, account_ref)
+    merchant = merchant_profile(flagged.get("category", ""), flagged.get("merchant", ""))
+
     recorder.finish(
         "IngestAgent",
         output={
-            "frames_sampled": len(frames),
-            "sampler": ingested["sampler"],
-            "camera_id": frames[0]["camera_id"],
-            "location": frames[0]["location"],
-            "event_ts": frames[0]["ts"],
+            "events_parsed": len(events),
+            "account_ref": account_ref,
+            "merchant": flagged.get("merchant"),
+            "amount": flagged.get("amount"),
+            "event_ts": flagged.get("ts"),
+            "history_count": ingested["history_count"],
         },
-        detail=f"{len(frames)} frames via {ingested['sampler']}",
+        detail=f"{len(events)} events · {account_ref}",
     )
     yield {"type": "trace", "data": [s.model_dump() for s in recorder.snapshot()]}
 
@@ -380,14 +401,16 @@ async def _run_audit_inner(
     if mode == "live":
         # ADK runs the whole tree; mark the model stages running for the UI,
         # then fill in their real outputs once the tree completes.
-        for agent in ("DetectorAgent", "PlateAgent", "MemoryAgent", "AuditorAgent"):
+        for agent in _MODEL_STAGES:
             recorder.start(agent)
         yield {"type": "trace", "data": [s.model_dump() for s in recorder.snapshot()]}
         try:
-            state = await _run_adk(frames, challan_id, operator_note, None)
+            state = await _run_adk(
+                events, challan_id, operator_note, None, ingested, account, merchant
+            )
         except Exception as exc:  # noqa: BLE001 — surface any ADK/Gemini failure
             detail = _flatten_exception(exc)
-            for agent in ("DetectorAgent", "PlateAgent", "MemoryAgent", "AuditorAgent"):
+            for agent in _MODEL_STAGES:
                 recorder.finish(agent, detail=detail, status="error")
             yield {"type": "trace", "data": [s.model_dump() for s in recorder.snapshot()]}
             yield {
@@ -396,17 +419,17 @@ async def _run_audit_inner(
             }
             return
 
-        detection = Detection(**_as_dict(state.get("detection")))
-        plate = PlateRead(**_as_dict(state.get("plate_read")))
+        signal = RiskSignal(**_as_dict(state.get("signal")))
+        attribution = AttributionRead(**_as_dict(state.get("attribution")))
         duplicate = DuplicateCheck(**_as_dict(state.get("duplicate")))
         rule_dict = _as_dict(state.get("rule"))
         rule = RuleCitation(**rule_dict) if rule_dict else None
         verdict = Verdict(**_as_dict(state.get("verdict")))
 
-        recorder.finish("DetectorAgent", output=detection.model_dump(),
-                        detail=f"{detection.violation_type} @ {detection.raw_confidence:.0%}")
-        recorder.finish("PlateAgent", output=plate.model_dump(),
-                        detail=f"{plate.plate} · min {plate.min_confidence:.0%}")
+        recorder.finish("SignalAgent", output=signal.model_dump(),
+                        detail=f"{signal.fraud_type} @ {signal.raw_confidence:.0%}")
+        recorder.finish("AttributionAgent", output=attribution.model_dump(),
+                        detail=f"{attribution.account_ref} · min {attribution.min_confidence:.0%}")
         recorder.finish("MemoryAgent",
                         output={"duplicate": duplicate.model_dump(),
                                 "rule": rule.model_dump() if rule else None,
@@ -417,26 +440,28 @@ async def _run_audit_inner(
         yield {"type": "trace", "data": [s.model_dump() for s in recorder.snapshot()]}
 
     else:
-        # -- Simulation: detector + plate concurrently ---------------------- #
-        recorder.start("DetectorAgent")
-        recorder.start("PlateAgent")
+        # -- Simulation: signal + attribution concurrently ------------------ #
+        recorder.start("SignalAgent")
+        recorder.start("AttributionAgent")
         yield {"type": "trace", "data": [s.model_dump() for s in recorder.snapshot()]}
         await asyncio.sleep(0.45)
 
-        detection = simulator.synth_detection(scenario, frames)
+        signal = simulator.synth_signal(scenario, events)
         recorder.finish(
-            "DetectorAgent",
-            output=detection.model_dump(),
-            detail=f"{detection.violation_type} @ {detection.raw_confidence:.0%}",
+            "SignalAgent",
+            output=signal.model_dump(),
+            detail=f"{signal.fraud_type} @ {signal.raw_confidence:.0%}",
         )
         yield {"type": "trace", "data": [s.model_dump() for s in recorder.snapshot()]}
 
         await asyncio.sleep(0.35)
-        plate = simulator.synth_plate_read(scenario, frames, f"{filename}:{frames[0]['ts']}")
+        attribution = simulator.synth_attribution(
+            scenario, events, f"{filename}:{flagged['ts']}", account_ref
+        )
         recorder.finish(
-            "PlateAgent",
-            output=plate.model_dump(),
-            detail=f"{plate.plate} · min {plate.min_confidence:.0%}",
+            "AttributionAgent",
+            output=attribution.model_dump(),
+            detail=f"{attribution.account_ref} · min {attribution.min_confidence:.0%}",
         )
         yield {"type": "trace", "data": [s.model_dump() for s in recorder.snapshot()]}
 
@@ -447,20 +472,20 @@ async def _run_audit_inner(
 
         candidates = await asyncio.to_thread(
             db.recent_events_for_dedup,
-            plate.plate,
-            frames[0]["location"],
+            account_ref,
+            flagged.get("merchant", ""),
             settings.duplicate_window_seconds,
         )
         duplicate = await asyncio.to_thread(
             memory.check_duplicate,
-            plate.plate,
-            frames[0]["location"],
-            detection.violation_type,
-            frames[0]["ts"],
-            detection.region_description,
+            account_ref,
+            flagged.get("merchant", ""),
+            signal.fraud_type,
+            flagged.get("ts", ""),
+            signal.evidence_summary,
             candidates,
         )
-        rule = memory.rule_for_violation(detection.violation_type)
+        rule = memory.rule_for_fraud_type(signal.fraud_type)
         recorder.finish(
             "MemoryAgent",
             output={
@@ -478,7 +503,7 @@ async def _run_audit_inner(
         await asyncio.sleep(0.7)
 
         verdict = simulator.audit(
-            scenario, detection, plate, duplicate, rule.section if rule else None
+            scenario, signal, attribution, duplicate, rule.section if rule else None
         )
         bias = enkrypt.check_bias(verdict.reasoning)
         recorder.finish(
@@ -492,11 +517,10 @@ async def _run_audit_inner(
     recorder.start("VerdictRouter")
     yield {"type": "trace", "data": [s.model_dump() for s in recorder.snapshot()]}
 
-    registry = await asyncio.to_thread(vahan_lookup, plate.plate, detection.violation_type)
-    vehicle_type = registry.get("vehicle_type") or infer_vehicle_type(
-        plate.plate, detection.violation_type
-    )
-    fine_amount = mv_act.fine_for(detection.violation_type) if verdict.verdict == "ISSUE" else 0
+    segment = account.get("segment") or infer_segment(account_ref, signal.fraud_type)
+    # The money actually taken out of the customer's reach. Unlike a fine, this
+    # is not a tariff we look up — it is their own transaction, held.
+    amount_held = float(flagged.get("amount", 0)) if verdict.verdict == "ISSUE" else 0.0
 
     evidence: EvidencePacket | None = None
     branch_detail = ""
@@ -504,7 +528,7 @@ async def _run_audit_inner(
     review_uncertainty = ""
 
     if verdict.verdict == "ISSUE":
-        branch_detail = "ISSUE → EvidenceAgent · challan drafted"
+        branch_detail = "ISSUE → EvidenceAgent · case file drafted"
     elif verdict.verdict == "ESCALATE":
         checks = verdict.checks.model_dump()
         failed = [k for k, v in checks.items() if v is False and k != "duplicate"]
@@ -516,15 +540,15 @@ async def _run_audit_inner(
         review_id = f"rev_{uuid.uuid4().hex[:12]}"
         branch_detail = f"ESCALATE → HumanQueueAgent · {review_id}"
     else:
-        branch_detail = "REJECT → dropped, still ledgered"
+        branch_detail = "REJECT → alert dismissed, still ledgered"
 
     recorder.finish(
         "VerdictRouter",
         output={
             "branch": verdict.verdict,
             "review_id": review_id,
-            "fine_amount": fine_amount,
-            "vehicle_type": vehicle_type,
+            "amount_held": amount_held,
+            "segment": segment,
         },
         detail=branch_detail,
     )
@@ -534,15 +558,14 @@ async def _run_audit_inner(
     recorder.start("LedgerAgent")
     yield {"type": "trace", "data": [s.model_dump() for s in recorder.snapshot()]}
 
-    # The evidence frames are rendered before the append, not after, because
-    # the ledger commits to their digest. Hashing them afterwards would leave
-    # the evidence outside the chain — which is the gap this closes.
-    frame_uris: list[str] = []
-    for frame in frames[:4]:
-        uri = await asyncio.to_thread(ingest.frame_to_data_uri, frame["path"])
-        if uri:
-            frame_uris.append(uri)
-    frames_sha256 = db.evidence_digest(frame_uris)
+    # The evidence rows are digested before the append, not after, because the
+    # ledger commits to that digest. Hashing them afterwards would leave the
+    # evidence outside the chain — which is the gap this closes.
+    evidence_rows = [
+        f"{e.get('ts')}|{e.get('amount')}|{e.get('merchant')}|{e.get('channel')}|{e.get('status')}"
+        for e in events
+    ]
+    events_sha256 = db.evidence_digest(evidence_rows)
 
     ledger_payload = {
         "challan_id": challan_id,
@@ -550,19 +573,19 @@ async def _run_audit_inner(
         "verdict": verdict.verdict,
         "trust_score": verdict.trust_score,
         "checks": verdict.checks.model_dump(),
-        "violation_type": detection.violation_type,
-        "detector_confidence": detection.raw_confidence,
-        "plate": plate.plate,
-        "plate_min_confidence": plate.min_confidence,
-        "location": frames[0]["location"],
-        "camera_id": frames[0]["camera_id"],
-        "event_ts": frames[0]["ts"],
+        "fraud_type": signal.fraud_type,
+        "signal_confidence": signal.raw_confidence,
+        "account_ref": attribution.account_ref,
+        "attribution_min_confidence": attribution.min_confidence,
+        "merchant": flagged.get("merchant", ""),
+        "channel": flagged.get("channel", ""),
+        "event_ts": flagged.get("ts", ""),
         "rule_citation": rule.section if rule else "",
-        "fine_amount": fine_amount,
+        "amount_held": amount_held,
         "mode": mode,
         "reasoning": verdict.reasoning,
-        "frames_sha256": frames_sha256,
-        "frame_count": len(frame_uris),
+        "events_sha256": events_sha256,
+        "event_count": len(events),
     }
     ledger_id, ledger_hash = await asyncio.to_thread(db.append_ledger, ledger_payload)
     recorder.finish(
@@ -576,44 +599,47 @@ async def _run_audit_inner(
     if verdict.verdict == "ISSUE":
         evidence = EvidencePacket(
             challan_id=challan_id,
-            plate=plate.plate,
-            owner_masked=registry.get("owner_masked", "—"),
-            violation_type=detection.violation_type,
-            location=frames[0]["location"],
-            ts=frames[0]["ts"],
+            account_ref=attribution.account_ref,
+            customer_masked=account.get("customer_masked", "—"),
+            fraud_type=signal.fraud_type,
+            merchant=flagged.get("merchant", ""),
+            ts=flagged.get("ts", ""),
             trust_score=verdict.trust_score,
             reasoning=verdict.reasoning,
             rule_citation=rule.section if rule else "",
-            frames=frame_uris,
+            events=evidence_rows,
             ledger_hash=ledger_hash,
         )
 
-    naive = _naive_comparison(detection, plate, duplicate, verdict, fine_amount)
+    naive = _naive_comparison(
+        signal, attribution, duplicate, verdict, flagged, ingested.get("alert_score", 0.90)
+    )
 
     result = AuditResult(
         challan_id=challan_id,
         mode=mode,
         verdict=verdict,
-        detection=detection,
-        plate=plate,
-        frames=[Frame(**f) for f in frames],
+        signal=signal,
+        attribution=attribution,
+        events=[TxnEvent(**e) for e in events],
         duplicate=duplicate,
         rule=rule,
         evidence=evidence,
         ledger_id=ledger_id,
         ledger_hash=ledger_hash,
-        frames_sha256=frames_sha256,
+        events_sha256=events_sha256,
         trace=recorder.snapshot(),
         naive=naive,
         created_at=_now(),
     )
 
     stored = result.model_dump()
-    stored["frame_uris"] = frame_uris
-    stored["registry"] = enkrypt.scrub_owner_record(registry) | {
-        "owner_masked": registry.get("owner_masked", "—")
+    stored["account"] = enkrypt.scrub_owner_record(account) | {
+        "customer_masked": account.get("customer_masked", "—")
     }
-    stored["fine_amount"] = fine_amount
+    stored["merchant_profile"] = merchant
+    stored["amount_held"] = amount_held
+    stored["flagged_amount"] = float(flagged.get("amount", 0))
     stored["scenario"] = scenario
     stored["review_id"] = review_id
 
@@ -623,13 +649,14 @@ async def _run_audit_inner(
             "challan_id": challan_id,
             "verdict": verdict.verdict,
             "trust_score": verdict.trust_score,
-            "violation_type": detection.violation_type,
-            "plate": plate.plate,
-            "location": frames[0]["location"],
-            "area": _area_of(frames[0]["location"]),
-            "vehicle_type": vehicle_type,
-            "camera_id": frames[0]["camera_id"],
-            "event_ts": frames[0]["ts"],
+            "fraud_type": signal.fraud_type,
+            "account_ref": attribution.account_ref,
+            "merchant": flagged.get("merchant", ""),
+            "region": _region_of(flagged),
+            "segment": segment,
+            "channel": flagged.get("channel", ""),
+            "event_ts": flagged.get("ts", ""),
+            "amount_held": amount_held,
             "ledger_id": ledger_id,
             "ledger_hash": ledger_hash,
             "result": stored,
@@ -645,64 +672,77 @@ async def _run_audit_inner(
     await asyncio.to_thread(
         memory.remember_event,
         challan_id,
-        plate.plate,
-        frames[0]["location"],
-        detection.violation_type,
-        frames[0]["ts"],
-        detection.region_description,
+        attribution.account_ref,
+        flagged.get("merchant", ""),
+        signal.fraud_type,
+        flagged.get("ts", ""),
+        signal.evidence_summary,
     )
 
     yield {"type": "result", "data": stored}
 
 
 def _naive_comparison(
-    detection: Detection,
-    plate: PlateRead,
+    signal: RiskSignal,
+    attribution: AttributionRead,
     duplicate: DuplicateCheck,
     verdict: Verdict,
-    fine_amount: int,
+    flagged: dict,
+    alert_score: float,
 ) -> NaiveComparison:
-    """What a confidence-threshold-only system does with the same input.
+    """What a score-threshold-only engine does with the same input.
 
-    The comparison the demo turns on: a naive system reads one number — the
-    detector's confidence — and charges on it. It never sees the plate
-    reliability, the camera geometry, or the duplicate.
+    The comparison the demo turns on. Note which number this reads: the
+    *upstream* model's score, the one that fired the alert — not our own
+    perception stage. Deriving the baseline from our SignalAgent would be
+    circular and would flatter us, because by then the auditor's work is
+    already done. The existing engine sees one number and acts on it. It never
+    checks whether the activity is attributable to anyone but the customer,
+    whether the timestamps are settlement artifacts, or whether it already
+    acted on this alert.
     """
-    would_issue = detection.raw_confidence >= 0.85 and detection.violation_type != "none"
-    amount = mv_act.fine_for(detection.violation_type) if would_issue else 0
+    would_issue = alert_score >= 0.85
+    amount = float(flagged.get("amount", 0)) if would_issue else 0.0
 
     if would_issue and verdict.verdict != "ISSUE":
         if duplicate.is_duplicate:
             basis = (
-                f"Detector confidence {detection.raw_confidence:.0%} clears a naive 85% "
-                "threshold, so a second fine is issued for an event already charged."
+                f"The bank's model scored this {alert_score:.0%}, clearing a naive 85% threshold, so the "
+                "account is blocked a second time for an alert already actioned."
             )
-        elif plate.min_confidence < settings.plate_confidence_floor:
+        elif attribution.matches_known_behaviour:
             basis = (
-                f"Detector confidence {detection.raw_confidence:.0%} clears a naive 85% "
-                f"threshold. The plate's weakest character reads at {plate.min_confidence:.0%}, "
-                "but a threshold-only system never checks that — the fine goes to whichever "
-                "plate the OCR guessed."
+                f"The bank's model scored this {alert_score:.0%}, clearing a naive 85% threshold. The "
+                "activity matches this customer's own established pattern, but a "
+                "threshold-only engine never checks that — it blocks on the score alone."
+            )
+        elif attribution.min_confidence < settings.attribution_confidence_floor:
+            basis = (
+                f"The bank's model scored this {alert_score:.0%}, clearing a naive 85% threshold. The "
+                f"weakest attribution indicator scores only {attribution.min_confidence:.0%}, "
+                "but a threshold-only engine never asks whether this was actually someone "
+                "other than the customer — the hold lands regardless."
             )
         else:
             basis = (
-                f"Detector confidence {detection.raw_confidence:.0%} clears a naive 85% "
-                "threshold, so the fine issues automatically with no second look at the "
-                "camera geometry."
+                f"The bank's model scored this {alert_score:.0%}, clearing a naive 85% threshold, so the "
+                "hold is placed automatically with no second look at the evidence."
             )
     elif would_issue:
         basis = (
-            f"Detector confidence {detection.raw_confidence:.0%} clears the threshold, and "
-            "the audit independently confirms the fine is safe to issue."
+            f"The bank's model scored this {alert_score:.0%}, clearing the threshold, and the "
+            "audit independently confirms the hold is justified."
         )
     else:
         basis = (
-            f"Detector confidence {detection.raw_confidence:.0%} is below a naive 85% "
-            "threshold, so no fine issues either way."
+            f"The bank's model scored this {alert_score:.0%}, below a naive 85% threshold, so "
+            "no hold is placed either way."
         )
 
-    return NaiveComparison(would_issue=would_issue, basis=basis, fine_amount=amount)
+    return NaiveComparison(would_issue=would_issue, basis=basis, amount_held=amount)
 
 
-def _area_of(location: str) -> str:
-    return (location or "unknown").split(",")[0].strip() or "unknown"
+def _region_of(flagged: dict) -> str:
+    """Bias slices report by city; an unnamed city still needs a bucket."""
+    city = (flagged.get("city") or "").strip()
+    return city or "unknown"

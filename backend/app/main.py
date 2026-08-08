@@ -27,7 +27,7 @@ from .schemas import (
     ReviewDecision,
     ReviewOutcome,
 )
-from .tools import mv_act
+from .tools import fraud_rules
 from .tools.memory import memory
 
 app = FastAPI(
@@ -35,7 +35,7 @@ app = FastAPI(
     version="1.0.0",
     description=(
         "The accountability layer for automated traffic enforcement. An adversarial "
-        "agent pipeline audits every AI-flagged violation before a rupee is charged."
+        "agent pipeline audits every AI-flagged transaction before a rupee is held."
     ),
 )
 
@@ -106,7 +106,7 @@ async def architecture() -> dict:
         "thresholds": {
             "issue_trust_threshold": settings.issue_trust_threshold,
             "escalate_trust_floor": settings.escalate_trust_floor,
-            "plate_confidence_floor": settings.plate_confidence_floor,
+            "attribution_confidence_floor": settings.attribution_confidence_floor,
             "duplicate_window_seconds": settings.duplicate_window_seconds,
         },
     }
@@ -157,10 +157,10 @@ async def audit(
     file: UploadFile = File(...),
     operator_note: str = Form(""),
     scenario: str = Form(""),
-    location: str = Form(""),
+    account: str = Form(""),
     stream: bool = Query(True, description="Stream the agent trace over SSE"),
 ):
-    """Run the full pipeline on an uploaded clip or still.
+    """Run the full pipeline on an uploaded fraud alert.
 
     Streams the live agent trace as Server-Sent Events by default; pass
     `?stream=false` for a single JSON response.
@@ -172,7 +172,7 @@ async def audit(
         final: dict | None = None
         error: dict | None = None
         async for envelope in pipeline.run_audit(
-            str(saved), filename, operator_note, scenario or None, location or None
+            str(saved), filename, operator_note, scenario or None, account or None
         ):
             if envelope["type"] == "result":
                 final = envelope["data"]
@@ -221,16 +221,16 @@ async def list_challans(limit: int = Query(50, ge=1, le=500), verdict: str | Non
                 "challan_id": r["challan_id"],
                 "verdict": r["verdict"],
                 "trust_score": r["trust_score"],
-                "violation_type": r["violation_type"],
-                "violation_label": mv_act.label_for(r["violation_type"]),
-                "plate": r["plate"],
-                "location": r["location"],
-                "area": r["area"],
-                "vehicle_type": r["vehicle_type"],
+                "fraud_type": r["fraud_type"],
+                "fraud_label": fraud_rules.label_for(r["fraud_type"]),
+                "account_ref": r["account_ref"],
+                "merchant": r["merchant"],
+                "region": r["region"],
+                "segment": r["segment"],
                 "event_ts": r["event_ts"],
                 "ledger_hash": r["ledger_hash"],
                 "created_at": r["created_at"],
-                "fine_amount": r["result"].get("fine_amount", 0),
+                "amount_held": r["result"].get("amount_held", 0),
             }
             for r in rows
         ],
@@ -372,7 +372,7 @@ async def rules(q: str = Query("", description="Semantic query over the MV Act c
     if q:
         hits = await asyncio.to_thread(memory.search_rules, q, 5)
         return {"query": q, "results": [h.model_dump() for h in hits], "backend": memory.backend}
-    return {"sections": mv_act.MV_ACT_SECTIONS, "count": len(mv_act.MV_ACT_SECTIONS)}
+    return {"sections": fraud_rules.FRAUD_RULES, "count": len(fraud_rules.FRAUD_RULES)}
 
 
 # --------------------------------------------------------------------------- #
@@ -414,11 +414,11 @@ async def demo_seed(force: bool = Query(False)) -> dict:
     events through the same pipeline, so the hash chain still verifies:
     nothing is inserted behind the pipeline's back.
 
-    Seeding forces simulation regardless of configured mode. The seed frames
-    are flat synthetic stills carrying their scenario in the filename; sending
-    them through live vision would spend real quota to have a model correctly
-    report "no violation visible" on a blank rectangle. An audit that arrives
-    during the ~30s seed therefore also runs in simulation — acceptable for
+    Seeding forces simulation regardless of configured mode. The seed cases
+    carry their scenario in the filename and the simulator reproduces them
+    deterministically; sending sixteen of them through live inference would
+    spend real quota to reach verdicts we already know. An audit that arrives
+    during the ~20s seed therefore also runs in simulation — acceptable for
     what is an operator action taken before a demo, not during one.
     """
     existing = await asyncio.to_thread(db.list_challans, 1, None)
@@ -437,10 +437,10 @@ async def demo_seed(force: bool = Query(False)) -> dict:
     settings.force_simulation = True
     counts = {"ISSUE": 0, "REJECT": 0, "ESCALATE": 0}
     try:
-        for scenario, junction, camera, ts in seed.SEED_EVENTS:
-            filename = f"{scenario}_{camera}_{junction}_{ts}.jpg"
+        for scenario, junction, account, ts in seed.SEED_EVENTS:
+            filename = f"{scenario}_{junction}_{ts.replace(':', '-')}.json"
             path = seed.SEED_DIR / filename
-            await asyncio.to_thread(seed._still, path, f"{scenario} @ {junction} {ts}")
+            await asyncio.to_thread(seed._case, path, scenario, junction, account, ts)
             result = await seed._run_one(path, filename)
             if result:
                 counts[result["verdict"]["verdict"]] += 1
@@ -466,7 +466,7 @@ async def demo_scenarios() -> dict:
             {
                 "id": key,
                 "label": spec["label"],
-                "violation": spec["violation"],
+                "fraud_type": spec["fraud_type"],
                 "expected_verdict": _expected(key),
             }
             for key, spec in SCENARIOS.items()
