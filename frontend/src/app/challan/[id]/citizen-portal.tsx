@@ -26,7 +26,7 @@ import {
   Skeleton,
   buttonVariants,
 } from "@/components/ui/primitives";
-import { ChecksList, TrustMeter } from "@/components/verdict";
+import { ChecksList, TrustMeter, TxnLedger } from "@/components/verdict";
 import { api } from "@/lib/api";
 import {
   LANGUAGES,
@@ -111,7 +111,7 @@ function PortalBody({
   onDisputed: () => void;
 }) {
   const meta = VERDICT_META[view.verdict];
-  const owes = view.verdict === "ISSUE" && view.fine_amount > 0;
+  const held = view.verdict === "ISSUE" && view.amount_held > 0;
 
   return (
     <div className={cn("space-y-6", loading && "opacity-60")}>
@@ -171,30 +171,30 @@ function PortalBody({
             {view.what_this_means}
           </p>
 
-          {owes ? (
+          {held ? (
             <p className="mt-5 font-mono text-4xl font-semibold text-danger tabular">
-              {formatRupees(view.fine_amount)}
+              {formatRupees(view.amount_held)}
             </p>
           ) : (
             <p className="mt-5 inline-flex items-center gap-2 rounded-lg border border-good/30 bg-good/10 px-3 py-2 text-[13.5px] font-medium text-good">
               <CheckCircle2 className="size-4" aria-hidden="true" />
-              Nothing is owed
+              Nothing has been held
             </p>
           )}
         </div>
 
         <CardContent className="space-y-5 border-t border-edge pt-5">
           <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
-            <Field icon={FileText} label="Vehicle" value={view.plate} mono />
-            <Field icon={FileText} label="Registered owner" value={view.owner_masked} mono />
-            <Field icon={MapPin} label="Where" value={view.location} />
+            <Field icon={FileText} label="Card" value={view.account_ref} mono />
+            <Field icon={FileText} label="Account holder" value={view.customer_masked} mono />
+            <Field icon={MapPin} label="Merchant" value={view.merchant} />
             <Field icon={Clock} label="When" value={formatDateTime(view.ts)} />
           </dl>
 
           <p className="text-[12px] leading-relaxed text-ink-faint">
-            The owner&rsquo;s name is masked here and was withheld from every model in the
-            pipeline. Who owns a vehicle is never a valid input to whether a violation
-            occurred.
+            Your name is masked here and was withheld from every model in the pipeline.
+            Who holds an account is never a valid input to whether a transaction was
+            unauthorised.
           </p>
         </CardContent>
       </Card>
@@ -231,7 +231,7 @@ function PortalBody({
             </div>
             <TrustMeter score={view.trust_score} className="mt-3" />
             <p className="mt-3 text-[12.5px] leading-relaxed text-ink-dim">
-              A fine is only issued above 90%. Between 60% and 90% a person reviews it.
+              Money is only held above 90%. Between 60% and 90% a person reviews it.
               Below that, it is dropped.
             </p>
           </div>
@@ -245,7 +245,7 @@ function PortalBody({
             <div className="rounded-lg border border-edge bg-panel-2/50 p-4">
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant="signal">{view.rule_citation}</Badge>
-                <span className="text-[12.5px] text-ink-dim">{view.violation_label}</span>
+                <span className="text-[12.5px] text-ink-dim">{view.fraud_label}</span>
               </div>
               {view.rule_text ? (
                 <p className="mt-3 text-[12.5px] leading-relaxed text-ink-dim">
@@ -260,24 +260,17 @@ function PortalBody({
       {/* ---------------------------------------------------------------- */}
       {/* Evidence                                                          */}
       {/* ---------------------------------------------------------------- */}
-      {view.frames.length ? (
+      {view.events?.length ? (
         <Card>
           <CardHeader>
-            <CardTitle>What the camera recorded</CardTitle>
+            <CardTitle>The transactions we looked at</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              {view.frames.map((uri, index) => (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  key={index}
-                  src={uri}
-                  alt={`Camera frame ${index + 1} of ${view.frames.length} for notice ${view.challan_id}`}
-                  className="aspect-video w-full rounded-lg border border-edge object-cover"
-                  loading="lazy"
-                />
-              ))}
-            </div>
+            <TxnLedger events={view.events} />
+            <p className="mt-3 text-[12px] leading-relaxed text-ink-faint">
+              The highlighted row is the payment our system flagged. The rest is your own
+              recent activity, which is what we compared it against.
+            </p>
           </CardContent>
         </Card>
       ) : null}
@@ -434,7 +427,7 @@ function DisputePanel({
       <Card className="border-good/25 bg-good/[0.05]">
         <CardContent className="pt-5">
           <p className="text-[13.5px] leading-relaxed text-good">
-            There is nothing to contest — no fine was issued and no record is held against
+            There is nothing to contest — nothing was held and no record is held against
             you.
           </p>
         </CardContent>

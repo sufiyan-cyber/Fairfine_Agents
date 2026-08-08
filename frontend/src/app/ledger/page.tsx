@@ -77,7 +77,7 @@ export default function LedgerPage() {
             Ledger explorer
           </h1>
           <p className="mt-2 max-w-2xl text-[14px] leading-relaxed text-ink-dim">
-            Every decision — issued, rejected and escalated alike — appended in order. Each
+            Every decision — blocked, allowed and escalated alike — appended in order. Each
             record&rsquo;s hash covers the one before it, so history cannot be rewritten
             without the chain visibly breaking.
           </p>
@@ -270,7 +270,7 @@ function RecordDetail({ record }: { record: LedgerRecord }) {
             href={`/challan/${encodeURIComponent(challanId)}`}
             className={buttonVariants({ variant: "secondary", size: "sm", className: "w-full" })}
           >
-            Open the citizen&rsquo;s view
+            Open the customer&rsquo;s view
           </Link>
         ) : null}
       </CardContent>

@@ -56,10 +56,11 @@ export default function DashboardPage() {
             Bias dashboard
           </h1>
           <p className="mt-2 max-w-3xl text-[14px] leading-relaxed text-ink-dim">
-            The headline metric is the share of AI-flagged events the auditor stopped before
-            anyone was charged. A high rate concentrated in one area or one vehicle class is
-            not a compliment to the auditor — it means the upstream detector performs worse
-            there, which is exactly the disparity automated enforcement usually hides.
+            The headline metric is the share of AI-flagged alerts the auditor stopped before
+            anyone&rsquo;s money was held. A high rate concentrated in one region or one
+            customer segment is not a compliment to the auditor — it means the upstream
+            model performs worse there, which is exactly the disparity a fraud engine
+            usually hides.
           </p>
         </header>
 
@@ -102,24 +103,24 @@ export default function DashboardPage() {
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <StatTile
                 value={data.total_events.toLocaleString("en-IN")}
-                label="Events audited"
-                hint="Every clip the pipeline decided on"
+                label="Alerts audited"
+                hint="Every alert the pipeline decided on"
               />
               <StatTile
-                value={data.wrongful_fines_prevented.toLocaleString("en-IN")}
-                label="Fines stopped"
-                hint="Rejected outright or held for a human"
+                value={data.wrongful_blocks_prevented.toLocaleString("en-IN")}
+                label="Blocks stopped"
+                hint="Dismissed outright or held for a human"
                 tone="text-good"
               />
               <StatTile
                 value={formatPercent(data.prevention_rate)}
                 label="Did not survive audit"
-                hint="Share of AI flags that failed at least one check"
+                hint="Share of AI alerts that failed at least one check"
                 tone="text-warn"
               />
               <StatTile
                 value={data.issued.toLocaleString("en-IN")}
-                label="Fines issued"
+                label="Blocks placed"
                 hint="Cleared all five checks and the 90% trust bar"
                 tone="text-danger"
               />
@@ -130,8 +131,8 @@ export default function DashboardPage() {
               <CardHeader>
                 <CardTitle>Prevention rate over the decision sequence</CardTitle>
                 <CardDescription>
-                  Cumulative share of flags stopped, with each decision coloured by its
-                  verdict. A rate that keeps climbing means the detector is drifting.
+                  Cumulative share of alerts stopped, with each decision coloured by its
+                  verdict. A rate that keeps climbing means the model is drifting.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -139,58 +140,59 @@ export default function DashboardPage() {
               </CardContent>
             </Card>
 
-            {/* Area + vehicle */}
+            {/* Region + segment */}
             <div className="grid gap-5 lg:grid-cols-2">
               <Card>
                 <CardHeader>
-                  <CardTitle>By area</CardTitle>
+                  <CardTitle>By region</CardTitle>
                   <CardDescription>
-                    Where the detector is least reliable. Geographic disparity here maps
-                    directly onto who gets wrongly charged.
+                    Where the model is least reliable. Geographic disparity here maps
+                    directly onto whose money stops working.
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
                   <VerdictComposition
-                    slices={data.by_area}
-                    caption="Bar length is the number of events; segments are the verdict split."
+                    slices={data.by_region}
+                    caption="Bar length is the number of alerts; segments are the verdict split."
                   />
-                  <SliceTable slices={data.by_area} keyLabel="Area" />
+                  <SliceTable slices={data.by_region} keyLabel="Region" />
                 </CardContent>
               </Card>
 
               <Card>
                 <CardHeader>
-                  <CardTitle>By vehicle type</CardTitle>
+                  <CardTitle>By customer segment</CardTitle>
                   <CardDescription>
-                    Two-wheelers carry smaller, dirtier plates and are read less reliably —
-                    a systematic disadvantage worth surfacing.
+                    The disparity that matters most. A student or pensioner blocked wrongly
+                    has no buffer — and thin transaction histories make them likelier to be
+                    flagged as &ldquo;out of pattern&rdquo; in the first place.
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
                   <VerdictComposition
-                    slices={data.by_vehicle_type}
-                    caption="Vehicle class is inferred from the plate and the violation type."
+                    slices={data.by_segment}
+                    caption="Segment comes from the account record, never from the model's reasoning."
                   />
-                  <SliceTable slices={data.by_vehicle_type} keyLabel="Vehicle type" />
+                  <SliceTable slices={data.by_segment} keyLabel="Segment" />
                 </CardContent>
               </Card>
             </div>
 
-            {/* Violation + hour */}
+            {/* Pattern + hour */}
             <div className="grid gap-5 lg:grid-cols-2">
               <Card>
                 <CardHeader>
-                  <CardTitle>By violation type</CardTitle>
+                  <CardTitle>By fraud pattern</CardTitle>
                   <CardDescription>
-                    Which offences the detector over-flags relative to what survives review.
+                    Which patterns the model over-flags relative to what survives review.
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
                   <VerdictComposition
-                    slices={data.by_violation_type}
-                    caption="Red-light calls fail visual confirmation most often — camera geometry."
+                    slices={data.by_fraud_type}
+                    caption="Impossible-travel calls fail pattern confirmation most often — batch settlement."
                   />
-                  <SliceTable slices={data.by_violation_type} keyLabel="Violation" />
+                  <SliceTable slices={data.by_fraud_type} keyLabel="Pattern" />
                 </CardContent>
               </Card>
 
@@ -198,8 +200,8 @@ export default function DashboardPage() {
                 <CardHeader>
                   <CardTitle>By hour of day</CardTitle>
                   <CardDescription>
-                    Night-time events should show a visibly higher stop rate. If they do not,
-                    the detector is overconfident in the dark.
+                    Overnight alerts should show a visibly higher stop rate. If they do not,
+                    the model is overconfident on activity nobody is awake to confirm.
                   </CardDescription>
                 </CardHeader>
                 <CardContent>

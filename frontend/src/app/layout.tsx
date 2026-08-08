@@ -5,8 +5,8 @@ import "./globals.css";
 
 /**
  * IBM Plex Sans carries institutional credibility — this product asks people
- * to trust an enforcement decision. JetBrains Mono handles every value that is
- * read character by character: plates, hashes, trust scores.
+ * to trust a fraud decision. JetBrains Mono handles every value that is read
+ * character by character: card references, amounts, hashes, trust scores.
  */
 const plex = IBM_Plex_Sans({
   variable: "--font-plex",
@@ -24,11 +24,11 @@ const jetbrains = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: "FairFine — accountability for automated traffic enforcement",
+    default: "FairFine — accountability for automated fraud decisions",
     template: "%s · FairFine",
   },
   description:
-    "An adversarial agent pipeline audits every AI-flagged traffic violation, issues fines only above a calibrated trust threshold, escalates ambiguity to a human, and writes every decision to a hash-chained ledger.",
+    "An adversarial agent pipeline audits every AI-flagged transaction, blocks only above a calibrated trust threshold, escalates ambiguity to a human, and writes every decision to a hash-chained ledger.",
   openGraph: {
     title: "FairFine",
     description:

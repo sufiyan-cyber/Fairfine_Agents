@@ -1,8 +1,12 @@
 import type { VerdictType } from "./types";
 
 /**
- * Verdict presentation, read from the citizen's side of the transaction.
- * REJECT is the good outcome: a wrongful fine was prevented.
+ * Verdict presentation, read from the customer's side.
+ *
+ * The internal vocabulary is ISSUE / ESCALATE / REJECT — the auditor's ruling
+ * on the monitoring system's alert. What an analyst says out loud is BLOCK /
+ * REVIEW / ALLOW, so that is what the interface shows. REJECT is the good
+ * outcome: a wrongful block was prevented.
  */
 export const VERDICT_META: Record<
   VerdictType,
@@ -18,8 +22,8 @@ export const VERDICT_META: Record<
   }
 > = {
   ISSUE: {
-    label: "Fine issued",
-    short: "ISSUE",
+    label: "Transaction blocked",
+    short: "BLOCK",
     tone: "danger",
     text: "text-danger",
     bg: "bg-danger/10",
@@ -29,23 +33,23 @@ export const VERDICT_META: Record<
   },
   ESCALATE: {
     label: "Held for human review",
-    short: "ESCALATE",
+    short: "REVIEW",
     tone: "warn",
     text: "text-warn",
     bg: "bg-warn/10",
     border: "border-warn/35",
     dot: "bg-warn",
-    description: "Genuine doubt remains. Nothing is charged until a person decides.",
+    description: "Genuine doubt remains. Nothing is held until a person decides.",
   },
   REJECT: {
-    label: "No fine — flag dismissed",
-    short: "REJECT",
+    label: "Allowed — alert dismissed",
+    short: "ALLOW",
     tone: "good",
     text: "text-good",
     bg: "bg-good/10",
     border: "border-good/35",
     dot: "bg-good",
-    description: "A check failed. A wrongful fine was prevented.",
+    description: "A check failed. A wrongful block was prevented.",
   },
 };
 
@@ -57,30 +61,30 @@ export const LANGUAGES: Array<{ code: "en" | "hi" | "kn" | "ta"; label: string; 
 ];
 
 export const CHECK_LABELS: Record<string, { label: string; goodWhen: boolean; help: string }> = {
-  visually_confirmed: {
-    label: "Violation visible in frame",
+  pattern_confirmed: {
+    label: "Fraud pattern confirmed",
     goodWhen: true,
-    help: "The violation is actually visible — not a camera angle or cropping artifact.",
+    help: "The pattern is real in the ledger — not a batch-settlement artifact or a truncated history.",
   },
-  plate_reliable: {
-    label: "Plate read reliable",
+  attribution_reliable: {
+    label: "Attribution reliable",
     goodWhen: true,
-    help: "Every character cleared the 85% confidence floor required to charge anyone.",
+    help: "Every indicator cleared the 85% floor required before acting against an account.",
   },
   duplicate: {
     label: "Not a duplicate",
     goodWhen: false,
-    help: "No near-identical event for this plate and location in the last 60 seconds.",
+    help: "No near-identical alert on this account at this merchant in the last 60 seconds.",
   },
   rule_applies: {
     label: "Cited rule applies",
     goodWhen: true,
-    help: "The Motor Vehicles Act section matches what is actually shown.",
+    help: "The rulebook section actually governs the pattern that was found.",
   },
-  environment_ok: {
-    label: "Image conditions adequate",
+  context_ok: {
+    label: "Account context supports it",
     goodWhen: true,
-    help: "Lighting, weather and motion blur do not undermine the evidence.",
+    help: "Tenure, prior wrongful blocks and merchant base rates do not undermine the case.",
   },
 };
 
@@ -94,7 +98,7 @@ export function formatPercent(value: number, digits = 0): string {
 }
 
 export function formatRupees(amount: number): string {
-  return `₹${amount.toLocaleString("en-IN")}`;
+  return `₹${Math.round(amount).toLocaleString("en-IN")}`;
 }
 
 export function formatDateTime(iso: string): string {
@@ -135,7 +139,7 @@ export function titleCase(value: string): string {
     .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
-/** Colour ramp for a 0..1 confidence value, used on per-character plate reads. */
+/** Colour ramp for a 0..1 confidence value, used on per-indicator scores. */
 export function confidenceTone(value: number, floor = 0.85): string {
   if (value >= floor) return "text-good border-good/40 bg-good/10";
   if (value >= 0.6) return "text-warn border-warn/40 bg-warn/10";

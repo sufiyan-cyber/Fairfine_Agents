@@ -24,7 +24,7 @@ import {
   Eyebrow,
   Skeleton,
 } from "@/components/ui/primitives";
-import { ChecksList, TrustMeter } from "@/components/verdict";
+import { ChecksList, TrustMeter, TxnLedger } from "@/components/verdict";
 import { api } from "@/lib/api";
 import { formatTime, truncateHash } from "@/lib/format";
 import type { AuditResult, PendingReview, ReviewOutcome } from "@/lib/types";
@@ -86,7 +86,7 @@ export default function ReviewPage() {
   async function decide(decision: "ISSUE" | "REJECT") {
     if (!selected) return;
     if (!officer.trim()) {
-      setFormError("Enter your officer ID — a decision has to be attributable.");
+      setFormError("Enter your analyst ID — a decision has to be attributable.");
       return;
     }
     if (note.trim().length < MIN_NOTE) {
@@ -116,7 +116,7 @@ export default function ReviewPage() {
         </h1>
         <p className="mt-2 max-w-2xl text-[14px] leading-relaxed text-ink-dim">
           The auditor sends a case here when it cannot rule it out and cannot stand behind
-          it either. No fine is issued until an officer decides, and the decision is
+          it either. Nothing is held until an analyst decides, and the decision is
           appended to the ledger with its reason — the machine&apos;s verdict is never
           overwritten, only answered.
         </p>
@@ -214,7 +214,7 @@ export default function ReviewPage() {
                         href={`/challan/${selected.challan_id}`}
                         className="text-[12.5px] text-signal hover:underline"
                       >
-                        Citizen view →
+                        Customer view →
                       </Link>
                     </div>
                   </CardHeader>
@@ -246,21 +246,13 @@ export default function ReviewPage() {
                           </p>
                         </div>
 
-                        {evidence.frame_uris?.length ? (
+                        {evidence.events?.length ? (
                           <div>
                             <p className="text-[12px] font-medium uppercase tracking-wider text-ink-faint">
-                              Evidence frames
+                              Transaction ledger
                             </p>
-                            <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                              {evidence.frame_uris.map((uri, i) => (
-                                /* eslint-disable-next-line @next/next/no-img-element */
-                                <img
-                                  key={i}
-                                  src={uri}
-                                  alt={`Evidence frame ${i + 1}`}
-                                  className="w-full rounded-md border border-edge"
-                                />
-                              ))}
+                            <div className="mt-2">
+                              <TxnLedger events={evidence.events} limit={8} />
                             </div>
                           </div>
                         ) : null}
@@ -306,7 +298,7 @@ export default function ReviewPage() {
                             htmlFor="officer"
                             className="text-[12px] font-medium uppercase tracking-wider text-ink-faint"
                           >
-                            Officer ID
+                            Analyst ID
                           </label>
                           <input
                             id="officer"
@@ -335,7 +327,7 @@ export default function ReviewPage() {
                             className="mt-1.5 w-full resize-y rounded-lg border border-edge-strong bg-panel-2/50 px-3 py-2.5 text-[13.5px] leading-relaxed text-ink outline-none transition-colors placeholder:text-ink-faint focus:border-signal/50"
                           />
                           <p className="mt-1 text-[11.5px] text-ink-faint">
-                            Stored with your decision and shown to the citizen. Personal
+                            Stored with your decision and shown to the customer. Personal
                             details are redacted before it is saved.
                           </p>
                         </div>
@@ -355,7 +347,7 @@ export default function ReviewPage() {
                             ) : (
                               <AlertTriangle className="size-4" aria-hidden="true" />
                             )}
-                            Issue the fine
+                            Place the block
                           </Button>
                           <Button
                             variant="secondary"
@@ -367,7 +359,7 @@ export default function ReviewPage() {
                             ) : (
                               <XCircle className="size-4" aria-hidden="true" />
                             )}
-                            Reject — no fine
+                            Allow — no block
                           </Button>
                         </div>
                       </div>

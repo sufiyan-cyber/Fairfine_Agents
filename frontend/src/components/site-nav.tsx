@@ -155,10 +155,10 @@ export function SiteFooter() {
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-[12.5px] leading-relaxed text-ink-faint">
             FairFine is decision support with a human in the loop for ambiguous cases.
-            It does not replace police officers.
+            It does not replace a fraud-operations team.
           </p>
           <p className="font-mono text-[11px] text-ink-faint">
-            Demo build · mocked VAHAN · synthetic plates
+            Demo build · mocked core banking · synthetic transactions
           </p>
         </div>
       </div>

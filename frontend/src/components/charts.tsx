@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils";
  */
 
 const SERIES = {
-  issued: { label: "Issued", color: "var(--color-danger)" },
+  issued: { label: "Blocked", color: "var(--color-danger)" },
   escalated: { label: "Escalated", color: "var(--color-warn)" },
   rejected: { label: "Rejected", color: "var(--color-good)" },
 } as const;
@@ -63,7 +63,7 @@ export function VerdictComposition({
               <div
                 className="h-5 w-full overflow-hidden rounded-md bg-panel-3"
                 role="img"
-                aria-label={`${slice.key}: ${slice.total} events — ${slice.issued} issued, ${slice.escalated} escalated, ${slice.rejected} rejected`}
+                aria-label={`${slice.key}: ${slice.total} alerts — ${slice.issued} blocked, ${slice.escalated} escalated, ${slice.rejected} allowed`}
               >
                 <div className="flex h-full" style={{ width: `${width}%` }}>
                   {segments.map((segment) => (

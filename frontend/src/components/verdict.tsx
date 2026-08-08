@@ -6,9 +6,16 @@ import {
   VERDICT_META,
   checkPassed,
   confidenceTone,
+  formatDateTime,
   formatPercent,
+  formatRupees,
 } from "@/lib/format";
-import type { PlateRead, VerdictChecks, VerdictType } from "@/lib/types";
+import type {
+  AttributionRead,
+  TxnEvent,
+  VerdictChecks,
+  VerdictType,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /* -------------------------------------------------------------------------- */
@@ -99,7 +106,7 @@ export function TrustMeter({
         <div className="mt-1.5 flex justify-between font-mono text-[10px] text-ink-faint tabular">
           <span>0%</span>
           <span>
-            {formatPercent(escalateFloor)} escalate · {formatPercent(issueThreshold)} issue
+            {formatPercent(escalateFloor)} review · {formatPercent(issueThreshold)} block
           </span>
           <span>100%</span>
         </div>
@@ -160,57 +167,119 @@ export function ChecksList({
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Plate display — per-character confidence is the point, so show it          */
+/*  Transaction ledger — the evidence, with the flagged row called out         */
 /* -------------------------------------------------------------------------- */
-export function PlateDisplay({
-  plate,
+export function TxnLedger({ events, limit }: { events: TxnEvent[]; limit?: number }) {
+  if (!events?.length) {
+    return <p className="text-[12.5px] text-ink-faint">No transaction events recorded.</p>;
+  }
+
+  // The surrounding history is the argument, so show the flagged row in
+  // context rather than on its own — trimming from the top keeps it visible.
+  const shown = limit ? events.slice(-limit) : events;
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[560px] border-collapse text-[12px]">
+        <thead>
+          <tr className="border-b border-edge text-left text-ink-faint">
+            <th className="py-1.5 pr-3 font-medium">Time</th>
+            <th className="py-1.5 pr-3 text-right font-medium">Amount</th>
+            <th className="py-1.5 pr-3 font-medium">Merchant</th>
+            <th className="py-1.5 pr-3 font-medium">Channel</th>
+            <th className="py-1.5 pr-3 font-medium">City</th>
+            <th className="py-1.5 font-medium">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {shown.map((event) => (
+            <tr
+              key={event.event_id}
+              className={cn(
+                "border-b border-edge/50 last:border-0",
+                event.is_flagged && "bg-danger/[0.07] font-medium text-ink",
+              )}
+            >
+              <td className="whitespace-nowrap py-1.5 pr-3 font-mono tabular text-ink-dim">
+                {event.is_flagged ? "▶ " : ""}
+                {formatDateTime(event.ts)}
+              </td>
+              <td className="whitespace-nowrap py-1.5 pr-3 text-right font-mono tabular">
+                {formatRupees(event.amount)}
+              </td>
+              <td className="max-w-[200px] truncate py-1.5 pr-3">{event.merchant}</td>
+              <td className="whitespace-nowrap py-1.5 pr-3 text-ink-dim">{event.channel}</td>
+              <td className="whitespace-nowrap py-1.5 pr-3 text-ink-dim">{event.city || "—"}</td>
+              <td className="whitespace-nowrap py-1.5">
+                <span
+                  className={cn(
+                    event.status === "declined" ? "text-danger" : "text-ink-dim",
+                  )}
+                >
+                  {event.status}
+                </span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Attribution display — the weakest indicator governs, so show every one     */
+/* -------------------------------------------------------------------------- */
+export function AttributionDisplay({
+  attribution,
   floor = 0.85,
-  showChars = true,
 }: {
-  plate: PlateRead;
+  attribution: AttributionRead;
   floor?: number;
-  showChars?: boolean;
 }) {
-  const characters = plate.plate.split("");
-  const confidences = plate.per_char_confidence;
-  const hasPerChar = confidences.length === characters.length;
+  const { indicators, per_indicator_confidence: confidences } = attribution;
+  const hasPerIndicator = confidences.length === indicators.length;
 
   return (
     <div>
-      <div className="flex flex-wrap items-center gap-1.5">
-        {characters.map((character, index) => {
-          const confidence = hasPerChar ? confidences[index] : plate.min_confidence;
+      <p className="font-mono text-sm font-semibold text-ink">{attribution.account_ref}</p>
+
+      <ul className="mt-3 space-y-1.5">
+        {indicators.map((indicator, index) => {
+          const confidence = hasPerIndicator
+            ? confidences[index]
+            : attribution.min_confidence;
           return (
-            <span
-              key={`${character}-${index}`}
-              className={cn(
-                "flex min-w-[26px] flex-col items-center rounded border px-1.5 py-1 font-mono",
-                showChars ? confidenceTone(confidence, floor) : "border-edge bg-panel-2 text-ink",
-              )}
-              title={`Character '${character}' read at ${formatPercent(confidence)} confidence`}
+            <li
+              key={`${indicator}-${index}`}
+              className="flex items-center justify-between gap-3 text-[12.5px]"
             >
-              <span className="text-sm font-semibold leading-none">{character}</span>
-              {showChars ? (
-                <span className="mt-1 text-[9px] leading-none tabular opacity-80">
-                  {Math.round(confidence * 100)}
-                </span>
-              ) : null}
-            </span>
+              <span className="min-w-0 flex-1 truncate text-ink-dim">{indicator}</span>
+              <span
+                className={cn(
+                  "shrink-0 rounded border px-1.5 py-0.5 font-mono text-[11px] tabular",
+                  confidenceTone(confidence, floor),
+                )}
+                title={`This indicator points to a non-customer with ${formatPercent(confidence)} confidence`}
+              >
+                {Math.round(confidence * 100)}
+              </span>
+            </li>
           );
         })}
-      </div>
+      </ul>
 
-      <div className="mt-2.5 flex flex-wrap items-center gap-2">
-        <Badge variant={plate.min_confidence >= floor ? "good" : "danger"}>
-          weakest character {formatPercent(plate.min_confidence)}
+      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-edge pt-3">
+        <Badge variant={attribution.min_confidence >= floor ? "good" : "danger"}>
+          weakest indicator {formatPercent(attribution.min_confidence)}
         </Badge>
         <span className="text-[11px] text-ink-faint">
-          floor to charge anyone: {formatPercent(floor)}
+          floor to act on an account: {formatPercent(floor)}
         </span>
-        {plate.occluded ? (
+        {attribution.matches_known_behaviour ? (
           <Badge variant="warn">
             <Minus className="size-3" />
-            occluded
+            matches the customer&rsquo;s own pattern
           </Badge>
         ) : null}
       </div>

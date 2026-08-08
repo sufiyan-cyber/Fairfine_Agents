@@ -24,17 +24,23 @@ import {
   Eyebrow,
   buttonVariants,
 } from "@/components/ui/primitives";
-import { ChecksList, PlateDisplay, TrustMeter, VerdictBadge } from "@/components/verdict";
+import {
+  AttributionDisplay,
+  ChecksList,
+  TrustMeter,
+  TxnLedger,
+  VerdictBadge,
+} from "@/components/verdict";
 import { api, streamAudit } from "@/lib/api";
 import { VERDICT_META, formatPercent, formatRupees, titleCase, truncateHash } from "@/lib/format";
 import type { AuditResult, AuditTrace } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const IDLE_TRACE: AuditTrace[] = [
-  ["IngestAgent", "Sampling frames + metadata"],
-  ["DetectorAgent", "Classifying violation"],
-  ["PlateAgent", "Reading plate + per-char confidence"],
-  ["MemoryAgent", "Duplicate sweep + MV Act retrieval"],
+  ["IngestAgent", "Parsing alert + account history"],
+  ["SignalAgent", "Classifying fraud pattern"],
+  ["AttributionAgent", "Scoring attribution confidence"],
+  ["MemoryAgent", "Duplicate sweep + rulebook retrieval"],
   ["AuditorAgent", "Adversarial review"],
   ["VerdictRouter", "Routing on verdict"],
   ["LedgerAgent", "Appending to hash chain"],
@@ -128,14 +134,14 @@ export default function ConsolePage() {
 
       <main id="main" className="relative z-10 mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6 lg:px-8">
         <header className="mb-7">
-          <Eyebrow>Officer console</Eyebrow>
+          <Eyebrow>Fraud operations console</Eyebrow>
           <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">
-            Audit an AI-flagged violation
+            Audit an AI-flagged transaction
           </h1>
           <p className="mt-2 max-w-2xl text-[14px] leading-relaxed text-ink-dim">
-            Upload a clip or still from any CCTV/ANPR feed. Every agent&rsquo;s output is
-            shown as it runs, and the decision is written to the ledger before it is
-            displayed.
+            Upload a fraud alert exported from any monitoring system. Every agent&rsquo;s
+            output is shown as it runs, and the decision is written to the ledger before
+            it is displayed.
           </p>
         </header>
 
@@ -160,7 +166,7 @@ export default function ConsolePage() {
           <div className={cn("space-y-5", !showVerdictColumn && "lg:contents")}>
             <Card>
               <CardHeader>
-                <CardTitle>Evidence clip</CardTitle>
+                <CardTitle>Alert case file</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div
@@ -185,7 +191,7 @@ export default function ConsolePage() {
                     ref={inputRef}
                     id="clip"
                     type="file"
-                    accept="video/mp4,video/quicktime,video/x-msvideo,video/x-matroska,video/webm,image/jpeg,image/png,image/webp"
+                    accept="application/json,.json"
                     className="sr-only"
                     onChange={(event) => onSelect(event.target.files?.[0] ?? null)}
                     disabled={running}
@@ -207,10 +213,10 @@ export default function ConsolePage() {
                     <div className="flex flex-col items-center gap-2">
                       <Upload className="size-7 text-ink-faint" aria-hidden="true" />
                       <p className="text-[13px] text-ink-dim">
-                        Drop a clip here, or choose a file
+                        Drop an alert here, or choose a file
                       </p>
                       <p className="text-[11.5px] text-ink-faint">
-                        mp4 · mov · avi · mkv · jpg · png — up to 200 MB
+                        JSON case file — flagged transaction + account history
                       </p>
                     </div>
                   )}
@@ -257,8 +263,8 @@ export default function ConsolePage() {
                   </div>
                 ) : mode === "live" ? (
                   <p className="rounded-lg border border-edge bg-panel-2/40 px-3 py-2 text-[11.5px] leading-snug text-ink-faint">
-                    Live inference — Gemini reads the frames from your upload directly.
-                    Nothing about the outcome is pre-set.
+                    Live inference — Gemini reads the transactions from your upload
+                    directly. Nothing about the outcome is pre-set.
                   </p>
                 ) : null}
 
@@ -334,7 +340,7 @@ export default function ConsolePage() {
 /* -------------------------------------------------------------------------- */
 function VerdictPanel({ result }: { result: AuditResult }) {
   const meta = VERDICT_META[result.verdict.verdict];
-  const fine = result.fine_amount ?? 0;
+  const held = result.amount_held ?? 0;
 
   return (
     <div className="animate-fade-up space-y-5">
@@ -362,20 +368,20 @@ function VerdictPanel({ result }: { result: AuditResult }) {
           </div>
 
           <div className="rounded-lg border border-edge bg-panel-2/60 p-4">
-            <Eyebrow>Auditor&rsquo;s reasoning · shown to the citizen verbatim</Eyebrow>
+            <Eyebrow>Auditor&rsquo;s reasoning · shown to the customer verbatim</Eyebrow>
             <p className="mt-2.5 text-[13.5px] leading-relaxed text-ink">
               {result.verdict.reasoning}
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {fine > 0 ? (
-              <Badge variant="danger">fine {formatRupees(fine)}</Badge>
+            {held > 0 ? (
+              <Badge variant="danger">held {formatRupees(held)}</Badge>
             ) : (
-              <Badge variant="good">no amount charged</Badge>
+              <Badge variant="good">nothing held</Badge>
             )}
             {result.rule ? <Badge variant="neutral">{result.rule.section}</Badge> : null}
-            <Badge variant="neutral">{titleCase(result.detection.violation_type)}</Badge>
+            <Badge variant="neutral">{titleCase(result.signal.fraud_type)}</Badge>
             {result.review_id ? (
               <Badge variant="warn">queued · {result.review_id}</Badge>
             ) : null}
@@ -385,7 +391,7 @@ function VerdictPanel({ result }: { result: AuditResult }) {
             href={`/challan/${encodeURIComponent(result.challan_id)}`}
             className={buttonVariants({ variant: "primary", className: "w-full" })}
           >
-            Open the citizen&rsquo;s view of this decision
+            Open the customer&rsquo;s view of this decision
             <ArrowRight className="size-4" aria-hidden="true" />
           </Link>
         </CardContent>
@@ -395,7 +401,7 @@ function VerdictPanel({ result }: { result: AuditResult }) {
       {result.naive ? (
         <Card>
           <CardHeader>
-            <CardTitle>What a threshold-only system would have done</CardTitle>
+            <CardTitle>What the bank&rsquo;s existing engine would have done</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -407,7 +413,7 @@ function VerdictPanel({ result }: { result: AuditResult }) {
                     : "border-edge bg-panel-2/50",
                 )}
               >
-                <Eyebrow>Naive system</Eyebrow>
+                <Eyebrow>Threshold-only engine</Eyebrow>
                 <p
                   className={cn(
                     "mt-2 font-mono text-sm font-semibold",
@@ -415,7 +421,7 @@ function VerdictPanel({ result }: { result: AuditResult }) {
                   )}
                 >
                   {result.naive.would_issue
-                    ? `ISSUE · ${formatRupees(result.naive.fine_amount)}`
+                    ? `BLOCK · ${formatRupees(result.naive.amount_held)}`
                     : "NO ACTION"}
                 </p>
                 <p className="mt-2.5 text-[12.5px] leading-relaxed text-ink-dim">
@@ -426,7 +432,7 @@ function VerdictPanel({ result }: { result: AuditResult }) {
               <div className={cn("rounded-lg border p-4", meta.border, meta.bg)}>
                 <Eyebrow>FairFine</Eyebrow>
                 <p className={cn("mt-2 font-mono text-sm font-semibold", meta.text)}>
-                  {meta.short} · {fine > 0 ? formatRupees(fine) : "₹0"}
+                  {meta.short} · {held > 0 ? formatRupees(held) : "₹0"}
                 </p>
                 <p className="mt-2.5 text-[12.5px] leading-relaxed text-ink-dim">
                   {meta.description} Trust {formatPercent(result.verdict.trust_score)} against
@@ -437,15 +443,15 @@ function VerdictPanel({ result }: { result: AuditResult }) {
 
             {result.naive.would_issue && result.verdict.verdict !== "ISSUE" ? (
               <p className="mt-4 rounded-lg border border-good/30 bg-good/[0.07] px-4 py-3 text-[13px] leading-relaxed text-good">
-                A wrongful fine of {formatRupees(result.naive.fine_amount)} was prevented on
-                this event.
+                A wrongful block of {formatRupees(result.naive.amount_held)} was prevented on
+                this account.
               </p>
             ) : null}
           </CardContent>
         </Card>
       ) : null}
 
-      {/* Checks + plate */}
+      {/* Checks + attribution */}
       <div className="grid gap-5 md:grid-cols-2">
         <Card>
           <CardHeader>
@@ -458,12 +464,12 @@ function VerdictPanel({ result }: { result: AuditResult }) {
 
         <Card>
           <CardHeader>
-            <CardTitle>Plate read</CardTitle>
+            <CardTitle>Attribution</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <PlateDisplay plate={result.plate} />
+            <AttributionDisplay attribution={result.attribution} />
             <div className="space-y-1.5 border-t border-edge pt-3 text-[12px] text-ink-dim">
-              <Row label="Detector confidence" value={formatPercent(result.detection.raw_confidence)} />
+              <Row label="Signal confidence" value={formatPercent(result.signal.raw_confidence)} />
               <Row label="Duplicate" value={result.duplicate.is_duplicate ? "yes" : "no"} />
               {result.duplicate.matched_challan_id ? (
                 <Row label="Matched" value={result.duplicate.matched_challan_id} mono />
@@ -473,27 +479,16 @@ function VerdictPanel({ result }: { result: AuditResult }) {
         </Card>
       </div>
 
-      {/* Evidence frames */}
-      {result.frame_uris?.length ? (
+      {/* The evidence itself */}
+      {result.events?.length ? (
         <Card>
           <CardHeader>
-            <CardTitle>Sampled frames</CardTitle>
+            <CardTitle>Transaction ledger reviewed</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              {result.frame_uris.map((uri, index) => (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  key={index}
-                  src={uri}
-                  alt={`Evidence frame ${index + 1} of ${result.frame_uris?.length}, ${result.detection.region_description.slice(0, 90)}`}
-                  className="aspect-video w-full rounded-lg border border-edge object-cover"
-                  loading="lazy"
-                />
-              ))}
-            </div>
+            <TxnLedger events={result.events} />
             <p className="mt-3 text-[12.5px] leading-relaxed text-ink-dim">
-              {result.detection.region_description}
+              {result.signal.evidence_summary}
             </p>
           </CardContent>
         </Card>
@@ -507,8 +502,11 @@ function VerdictPanel({ result }: { result: AuditResult }) {
         <CardContent className="space-y-1.5 text-[12px]">
           <Row label="Record" value={result.ledger_id} mono />
           <Row label="Hash" value={truncateHash(result.ledger_hash, 18, 10)} mono />
-          <Row label="Camera" value={result.frames[0]?.camera_id ?? "—"} mono />
-          <Row label="Location" value={result.frames[0]?.location ?? "—"} />
+          <Row label="Account" value={result.attribution.account_ref} mono />
+          <Row
+            label="Merchant"
+            value={result.events.find((e) => e.is_flagged)?.merchant ?? "—"}
+          />
           <Link
             href="/ledger"
             className={buttonVariants({ variant: "outline", size: "sm", className: "mt-4 w-full" })}

@@ -54,17 +54,17 @@ export function LiveStats() {
   const stats = [
     {
       value: dashboard.total_events.toLocaleString("en-IN"),
-      label: "events audited",
+      label: "alerts audited",
       tone: "text-ink",
     },
     {
-      value: dashboard.wrongful_fines_prevented.toLocaleString("en-IN"),
-      label: "fines stopped before charging",
+      value: dashboard.wrongful_blocks_prevented.toLocaleString("en-IN"),
+      label: "blocks stopped before the money moved",
       tone: "text-good",
     },
     {
       value: formatPercent(dashboard.prevention_rate),
-      label: "of AI flags did not survive audit",
+      label: "of AI alerts did not survive audit",
       tone: "text-warn",
     },
     {

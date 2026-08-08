@@ -2,33 +2,43 @@ export type VerdictType = "ISSUE" | "REJECT" | "ESCALATE";
 export type Language = "en" | "hi" | "kn" | "ta";
 export type TraceStatus = "pending" | "running" | "done" | "skipped" | "error";
 
-export interface Frame {
-  path: string;
+export interface TxnEvent {
+  event_id: string;
   ts: string;
-  camera_id: string;
-  location: string;
+  amount: number;
+  currency: string;
+  merchant: string;
+  category: string;
+  channel: string;
+  device_id: string;
+  city: string;
+  country: string;
+  status: string;
+  is_flagged: boolean;
 }
 
-export interface Detection {
-  violation_type: string;
-  region_description: string;
+export interface RiskSignal {
+  fraud_type: string;
+  evidence_summary: string;
   raw_confidence: number;
-  frame_ref: string;
+  event_ref: string;
 }
 
-export interface PlateRead {
-  plate: string;
-  per_char_confidence: number[];
+export interface AttributionRead {
+  account_ref: string;
+  indicators: string[];
+  per_indicator_confidence: number[];
   min_confidence: number;
-  occluded: boolean;
+  matches_known_behaviour: boolean;
+  ambiguous: boolean;
 }
 
 export interface VerdictChecks {
-  visually_confirmed: boolean;
-  plate_reliable: boolean;
+  pattern_confirmed: boolean;
+  attribution_reliable: boolean;
   duplicate: boolean;
   rule_applies: boolean;
-  environment_ok: boolean;
+  context_ok: boolean;
 }
 
 export interface Verdict {
@@ -69,20 +79,20 @@ export interface AuditTrace {
 export interface NaiveComparison {
   would_issue: boolean;
   basis: string;
-  fine_amount: number;
+  amount_held: number;
 }
 
 export interface EvidencePacket {
   challan_id: string;
-  plate: string;
-  owner_masked: string;
-  violation_type: string;
-  location: string;
+  account_ref: string;
+  customer_masked: string;
+  fraud_type: string;
+  merchant: string;
   ts: string;
   trust_score: number;
   reasoning: string;
   rule_citation: string;
-  frames: string[];
+  events: string[];
   ledger_hash: string;
 }
 
@@ -90,20 +100,22 @@ export interface AuditResult {
   challan_id: string;
   mode: string;
   verdict: Verdict;
-  detection: Detection;
-  plate: PlateRead;
-  frames: Frame[];
+  signal: RiskSignal;
+  attribution: AttributionRead;
+  events: TxnEvent[];
   duplicate: DuplicateCheck;
   rule: RuleCitation | null;
   evidence: EvidencePacket | null;
   ledger_id: string;
   ledger_hash: string;
+  events_sha256?: string;
   trace: AuditTrace[];
   naive: NaiveComparison | null;
   created_at: string;
-  frame_uris?: string[];
-  fine_amount?: number;
-  registry?: Record<string, unknown> & { owner_masked?: string };
+  amount_held?: number;
+  flagged_amount?: number;
+  account?: Record<string, unknown> & { customer_masked?: string };
+  merchant_profile?: Record<string, unknown>;
   scenario?: string;
   review_id?: string | null;
 }
@@ -115,20 +127,20 @@ export interface CitizenView {
   explanation: string;
   what_this_means: string;
   your_options: string[];
-  violation_label: string;
+  fraud_label: string;
   trust_score: number;
   verdict: VerdictType;
-  plate: string;
-  owner_masked: string;
-  location: string;
+  account_ref: string;
+  customer_masked: string;
+  merchant: string;
   ts: string;
   rule_citation: string;
   rule_text: string;
   auditor_reasoning: string;
   checks: VerdictChecks;
-  frames: string[];
+  events: TxnEvent[];
   ledger_hash: string;
-  fine_amount: number;
+  amount_held: number;
   disputable: boolean;
   dispute_status: string | null;
 }
@@ -203,11 +215,12 @@ export interface BiasDashboard {
   issued: number;
   rejected: number;
   escalated: number;
-  wrongful_fines_prevented: number;
+  wrongful_blocks_prevented: number;
   prevention_rate: number;
-  by_area: BiasSlice[];
-  by_vehicle_type: BiasSlice[];
-  by_violation_type: BiasSlice[];
+  amount_protected: number;
+  by_region: BiasSlice[];
+  by_segment: BiasSlice[];
+  by_fraud_type: BiasSlice[];
   by_hour: BiasSlice[];
   over_time: Array<{
     index: number;
@@ -223,16 +236,16 @@ export interface ChallanSummary {
   challan_id: string;
   verdict: VerdictType;
   trust_score: number;
-  violation_type: string;
-  violation_label: string;
-  plate: string;
-  location: string;
-  area: string;
-  vehicle_type: string;
+  fraud_type: string;
+  fraud_label: string;
+  account_ref: string;
+  merchant: string;
+  region: string;
+  segment: string;
   event_ts: string;
   ledger_hash: string;
   created_at: string;
-  fine_amount: number;
+  amount_held: number;
 }
 
 export interface AgentNode {
@@ -257,7 +270,7 @@ export interface Architecture {
   thresholds: {
     issue_trust_threshold: number;
     escalate_trust_floor: number;
-    plate_confidence_floor: number;
+    attribution_confidence_floor: number;
     duplicate_window_seconds: number;
   };
 }
