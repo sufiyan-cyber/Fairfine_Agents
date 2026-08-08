@@ -154,9 +154,13 @@ def ingest_case(
     now = datetime.now(timezone.utc)
     cap = events_per_case or settings.events_per_case
 
+    # The flagged row is numbered 0 and history continues from 1. Numbering both
+    # from zero gave the flagged transaction and the first history row the same
+    # generated id, which collided as a React key and let one row overwrite the
+    # other in the rendered ledger.
     flagged = _coerce_event(flagged_raw, 0, now, flagged=True)
     history = [
-        _coerce_event(row, index, now, flagged=False)
+        _coerce_event(row, index + 1, now, flagged=False)
         for index, row in enumerate(history_raw)
         if isinstance(row, dict)
     ]
@@ -167,6 +171,17 @@ def ingest_case(
 
     # Chronological, with the flagged transaction in its true position.
     events = sorted([flagged, *history], key=lambda event: event.ts)
+
+    # An uploaded export can carry its own repeated ids, which we do not
+    # control. Ids identify rows in the rendered ledger and in the evidence
+    # digest, so enforce uniqueness rather than trusting the file.
+    seen: dict[str, int] = {}
+    for event in events:
+        count = seen.get(event.event_id, 0)
+        seen[event.event_id] = count + 1
+        if count:
+            event.event_id = f"{event.event_id}-{count + 1}"
+
     flagged_index = next(
         (i for i, event in enumerate(events) if event.is_flagged), 0
     )
