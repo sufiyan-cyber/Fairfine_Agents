@@ -14,7 +14,6 @@ trace shape, so nothing downstream needs to know which one ran.
 from __future__ import annotations
 
 import asyncio
-import shutil
 import time
 import uuid
 from datetime import datetime, timezone
@@ -39,7 +38,6 @@ from .schemas import (
     TxnEvent,
     Verdict,
 )
-from .tools import fraud_rules
 from .tools.accounts import account_lookup, infer_segment, merchant_profile
 from .tools.memory import memory
 

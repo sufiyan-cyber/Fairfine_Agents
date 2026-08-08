@@ -34,7 +34,7 @@ app = FastAPI(
     title="FairFine",
     version="1.0.0",
     description=(
-        "The accountability layer for automated traffic enforcement. An adversarial "
+        "The accountability layer for automated fraud decisions. An adversarial "
         "agent pipeline audits every AI-flagged transaction before a rupee is held."
     ),
 )
@@ -60,8 +60,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MAX_UPLOAD_BYTES = 200 * 1024 * 1024
-ALLOWED_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".jpg", ".jpeg", ".png", ".webp"}
+# A case file is a transaction export, not media. Ten megabytes is already an
+# implausibly long account history; the old 200 MB ceiling existed for video.
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+ALLOWED_SUFFIXES = {".json", ".txt"}
 
 
 @app.on_event("startup")
@@ -116,14 +118,14 @@ async def architecture() -> dict:
 # Audit
 # --------------------------------------------------------------------------- #
 async def _persist_upload(file: UploadFile) -> Path:
-    suffix = Path(file.filename or "clip.mp4").suffix.lower()
+    suffix = Path(file.filename or "alert.json").suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
         raise HTTPException(
             status_code=415,
             detail=f"Unsupported file type '{suffix}'. Allowed: {', '.join(sorted(ALLOWED_SUFFIXES))}",
         )
 
-    target = UPLOAD_DIR / f"{uuid.uuid4().hex[:10]}_{Path(file.filename or 'clip').name}"
+    target = UPLOAD_DIR / f"{uuid.uuid4().hex[:10]}_{Path(file.filename or 'alert').name}"
     size = 0
     try:
         with target.open("wb") as out:
@@ -142,7 +144,7 @@ async def _persist_upload(file: UploadFile) -> Path:
         # lives until the request ends — and the request does not end until the
         # SSE audit finishes streaming, minutes later. Closing here drops that
         # second copy as soon as we have our own, halving the peak for a large
-        # clip. That matters most where the filesystem is in memory (Cloud
+        # case file. That matters most where the filesystem is in memory (Cloud
         # Run's is), because there the spare copy is spare RAM.
         await file.close()
 
@@ -187,7 +189,7 @@ async def audit(
     async def event_stream():
         try:
             async for envelope in pipeline.run_audit(
-                str(saved), filename, operator_note, scenario or None, location or None
+                str(saved), filename, operator_note, scenario or None, account or None
             ):
                 yield f"event: {envelope['type']}\ndata: {json.dumps(envelope['data'], default=str)}\n\n"
         except Exception as exc:  # noqa: BLE001 — the client must learn the stream died
@@ -383,7 +385,7 @@ async def demo_reset() -> dict:
     """Wipe all state so a pitch can be run from zero.
 
     Semantic memory is cleared alongside the tables. Leaving it behind meant a
-    reset only *looked* clean: the duplicate sweep still remembered every clip
+    reset only *looked* clean: the duplicate sweep still remembered every alert
     audited during rehearsal, so the first upload after a reset came back
     REJECT as a duplicate of a run nobody could see any more.
     """
