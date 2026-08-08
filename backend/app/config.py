@@ -81,9 +81,12 @@ class Settings(BaseSettings):
     database_url: str = f"sqlite:///{(BACKEND_ROOT / 'fairfine.db').as_posix()}"
 
     # --- Pipeline tuning (mirrors the auditor's verdict rules) ---
-    event_window_seconds: int = 3
-    frames_per_event: int = 5
-    plate_confidence_floor: float = 0.85
+    # How much of the account's surrounding activity the auditor is shown. Too
+    # few and an "out of pattern" call cannot be checked against the pattern.
+    events_per_case: int = 12
+    # The attribution floor is the load-bearing threshold: below it we may not
+    # act against an account, however strong the fraud pattern looks.
+    attribution_confidence_floor: float = 0.85
     issue_trust_threshold: float = 0.90
     escalate_trust_floor: float = 0.60
     duplicate_window_seconds: int = 60

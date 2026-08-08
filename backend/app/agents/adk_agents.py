@@ -2,15 +2,16 @@
 
     FairFineOrchestrator (SequentialAgent)
     ├─ PerceptionStage (ParallelAgent)
-    │   ├─ DetectorAgent   LlmAgent · gemini-2.5-flash · output_schema=Detection
-    │   └─ PlateAgent      LlmAgent · gemini-2.5-flash · output_schema=PlateRead
-    ├─ MemoryAgent         BaseAgent · Qdrant duplicate check + MV Act RAG
-    ├─ AuditorAgent ★      LlmAgent · gemini-2.5-pro   · output_schema=Verdict
-    └─ VerdictRouter       BaseAgent · ISSUE→Evidence, ESCALATE→HumanQueue, REJECT→drop
+    │   ├─ SignalAgent       LlmAgent · gemini-2.5-flash · output_schema=RiskSignal
+    │   └─ AttributionAgent  LlmAgent · gemini-2.5-flash · output_schema=AttributionRead
+    ├─ MemoryAgent          BaseAgent · duplicate-alert sweep + fraud-rulebook RAG
+    ├─ AuditorAgent ★       LlmAgent · gemini-2.5-flash · output_schema=Verdict
+    └─ VerdictRouter        BaseAgent · ISSUE→CaseFile, ESCALATE→HumanQueue, REJECT→drop
 
 ADK features carrying real weight here:
   * `output_schema` on every LlmAgent — no agent may answer in free text.
-  * `ParallelAgent` — detection and plate reading are independent, so they race.
+  * `ParallelAgent` — the fraud pattern and the attribution are independent
+    questions, so they race.
   * `before_model_callback` — Enkrypt PII scrub runs on the assembled request,
     so nothing unredacted can reach a model even if a prompt changes upstream.
   * `after_agent_callback` — the ledger append is bound to the orchestrator
@@ -33,10 +34,10 @@ from google.genai import types
 
 from ..config import settings
 from ..guardrails import enkrypt
-from ..schemas import Detection, PlateRead, Verdict
-from ..tools import mv_act
+from ..schemas import AttributionRead, RiskSignal, Verdict
+from ..tools import fraud_rules
+from ..tools.accounts import account_lookup, merchant_profile
 from ..tools.memory import memory
-from ..tools.vahan import vahan_lookup
 from . import prompts
 
 # --------------------------------------------------------------------------- #
@@ -143,28 +144,28 @@ def _agent_model(model_name: str, location: str | None = None):
 # --------------------------------------------------------------------------- #
 # Perception stage
 # --------------------------------------------------------------------------- #
-def build_detector_agent(location: str | None = None) -> LlmAgent:
+def build_signal_agent(location: str | None = None) -> LlmAgent:
     return LlmAgent(
-        name="DetectorAgent",
+        name="SignalAgent",
         model=_agent_model(settings.detector_model, location),
-        description="Classifies the traffic violation visible in the sampled frames.",
-        instruction=prompts.DETECTOR_PROMPT,
-        output_schema=Detection,
-        output_key="detection",
+        description="Classifies the fraud pattern present in the transaction ledger.",
+        instruction=prompts.SIGNAL_PROMPT,
+        output_schema=RiskSignal,
+        output_key="signal",
         before_model_callback=pii_scrub_callback,
         disallow_transfer_to_parent=True,
         disallow_transfer_to_peers=True,
     )
 
 
-def build_plate_agent(location: str | None = None) -> LlmAgent:
+def build_attribution_agent(location: str | None = None) -> LlmAgent:
     return LlmAgent(
-        name="PlateAgent",
+        name="AttributionAgent",
         model=_agent_model(settings.plate_model, location),
-        description="Reads the registration plate with per-character confidence.",
-        instruction=prompts.PLATE_PROMPT,
-        output_schema=PlateRead,
-        output_key="plate_read",
+        description="Assesses whether the activity is attributable to someone other than the customer.",
+        instruction=prompts.ATTRIBUTION_PROMPT,
+        output_schema=AttributionRead,
+        output_key="attribution",
         before_model_callback=pii_scrub_callback,
         disallow_transfer_to_parent=True,
         disallow_transfer_to_peers=True,
@@ -172,7 +173,7 @@ def build_plate_agent(location: str | None = None) -> LlmAgent:
 
 
 # --------------------------------------------------------------------------- #
-# MemoryAgent — Qdrant duplicate check + MV Act RAG
+# MemoryAgent — duplicate-alert sweep + fraud-rulebook RAG
 # --------------------------------------------------------------------------- #
 class MemoryAgent(BaseAgent):
     """Bridges perception and audit: near-duplicate sweep + statute retrieval.
@@ -187,30 +188,33 @@ class MemoryAgent(BaseAgent):
         from .. import db
 
         state = ctx.session.state
-        detection = _as_dict(state.get("detection"))
-        plate_read = _as_dict(state.get("plate_read"))
-        frames = state.get("frames", []) or []
+        signal = _as_dict(state.get("signal"))
+        attribution = _as_dict(state.get("attribution"))
+        events = state.get("events", []) or []
 
-        plate = plate_read.get("plate", "UNREADABLE")
-        location = frames[0]["location"] if frames else "unknown"
-        event_ts = frames[0]["ts"] if frames else ""
-        violation = detection.get("violation_type", "none")
+        flagged = next(
+            (e for e in events if e.get("is_flagged")), events[0] if events else {}
+        )
+        account_ref = attribution.get("account_ref") or state.get("account_ref", "UNRESOLVED")
+        merchant = flagged.get("merchant", "unknown")
+        event_ts = flagged.get("ts", "")
+        fraud_type = signal.get("fraud_type", "none")
 
         candidates = db.recent_events_for_dedup(
-            plate, location, settings.duplicate_window_seconds
+            account_ref, merchant, settings.duplicate_window_seconds
         )
         duplicate = memory.check_duplicate(
-            plate=plate,
-            location=location,
-            violation_type=violation,
+            account_ref=account_ref,
+            merchant=merchant,
+            fraud_type=fraud_type,
             ts=event_ts,
-            description=detection.get("region_description", ""),
+            description=signal.get("evidence_summary", ""),
             candidates=candidates,
         )
 
-        rule = memory.rule_for_violation(violation)
+        rule = memory.rule_for_fraud_type(fraud_type)
         related = memory.search_rules(
-            f"{violation} {detection.get('region_description', '')}", top_k=3
+            f"{fraud_type} {signal.get('evidence_summary', '')}", top_k=3
         )
 
         delta = {
@@ -249,11 +253,13 @@ def _auditor_instruction(ctx: ReadonlyContext) -> str:
     state so the auditor reviews concrete evidence, not placeholders."""
     state = ctx.state
     context = prompts.build_auditor_context(
-        detection=_as_dict(state.get("detection")),
-        plate=_as_dict(state.get("plate_read")),
+        signal=_as_dict(state.get("signal")),
+        attribution=_as_dict(state.get("attribution")),
         duplicate=_as_dict(state.get("duplicate")),
         rule=_as_dict(state.get("rule")) or None,
-        frames=state.get("frames", []) or [],
+        events=state.get("events", []) or [],
+        account=_as_dict(state.get("account")) or None,
+        merchant=_as_dict(state.get("merchant")) or None,
         dispute_reason=state.get("dispute_reason"),
     )
     base = prompts.REAUDIT_PROMPT if state.get("dispute_reason") else prompts.AUDITOR_PROMPT
@@ -267,8 +273,8 @@ def build_auditor_agent(
         name="AuditorAgent",
         model=_agent_model(model or settings.auditor_model, location),
         description=(
-            "Adversarially reviews the detection and plate read, and returns a "
-            "calibrated trust score with an ISSUE / REJECT / ESCALATE verdict."
+            "Adversarially reviews the risk signal and the attribution, and returns "
+            "a calibrated trust score with an ISSUE / REJECT / ESCALATE verdict."
         ),
         instruction=_auditor_instruction,
         output_schema=Verdict,
@@ -322,7 +328,7 @@ class HumanQueueAgent(BaseAgent):
 
 
 class RejectAgent(BaseAgent):
-    """REJECT branch — no fine is drafted. The decision is still ledgered."""
+    """REJECT branch — no action is taken. The decision is still ledgered."""
 
     async def _run_async_impl(
         self, ctx: InvocationContext
@@ -337,49 +343,63 @@ class RejectAgent(BaseAgent):
             actions=EventActions(state_delta=delta),
             content=types.Content(
                 role="model",
-                parts=[types.Part(text="No fine issued. Decision recorded in the ledger.")],
+                parts=[
+                    types.Part(text="No action taken. Decision recorded in the ledger.")
+                ],
             ),
         )
 
 
 def build_evidence_agent(location: str | None = None) -> LlmAgent:
-    """ISSUE branch — assembles the evidence packet and drafts the challan.
+    """ISSUE branch — assembles the case file and drafts the customer notice.
 
-    Holds the mock VAHAN lookup as an ADK tool. Owner identity is withheld from
-    the model by `scrub_owner_record`, so the drafted notice can never name a
-    person the model was not entitled to see.
+    Holds the mock account and merchant lookups as ADK tools. Customer identity
+    is withheld from the model by `scrub_owner_record`, so the drafted notice
+    can never name a person the model was not entitled to see.
     """
 
-    def registry_lookup(plate: str, violation_type: str = "") -> dict:
-        """Look up vehicle registration details for a plate (mock VAHAN).
+    def account_record(account_ref: str, fraud_type: str = "") -> dict:
+        """Look up account details for a masked account reference (mock core banking).
 
         Args:
-            plate: The registration number to look up.
-            violation_type: Optional violation hint for vehicle classification.
+            account_ref: The masked card or account reference to look up.
+            fraud_type: Optional pattern hint for context.
 
         Returns:
-            Registration details with owner identity withheld.
+            Account details with customer identity withheld.
         """
-        return enkrypt.scrub_owner_record(vahan_lookup(plate, violation_type))
+        return enkrypt.scrub_owner_record(account_lookup(account_ref, fraud_type))
+
+    def merchant_record(category: str, merchant_name: str = "") -> dict:
+        """Look up a merchant category's reputation and base fraud rate.
+
+        Args:
+            category: The merchant category, e.g. "gift_card".
+            merchant_name: Optional merchant name for the identifier.
+
+        Returns:
+            Merchant reputation including historical fraud rate and risk band.
+        """
+        return merchant_profile(category, merchant_name)
 
     def rule_text(section: str) -> dict:
-        """Fetch the full text of a Motor Vehicles Act section.
+        """Fetch the full text of a fraud-rulebook section.
 
         Args:
-            section: Section identifier, e.g. "MV Act §194D".
+            section: Section identifier, e.g. "Card Network Rules §11.3 — Fraud / Card-Absent".
 
         Returns:
-            The section's title, text and penalty.
+            The section's title, text and prescribed action.
         """
-        return mv_act.get_section(section) or {"error": "section not found"}
+        return fraud_rules.get_section(section) or {"error": "section not found"}
 
     return LlmAgent(
         name="EvidenceAgent",
         model=_agent_model(settings.detector_model, location),
-        description="Assembles the evidence packet and drafts the challan notice.",
+        description="Assembles the case file and drafts the customer notice.",
         instruction=prompts.EVIDENCE_PROMPT,
-        tools=[registry_lookup, rule_text],
-        output_key="challan_draft",
+        tools=[account_record, merchant_record, rule_text],
+        output_key="case_draft",
         before_model_callback=pii_scrub_callback,
         disallow_transfer_to_parent=True,
         disallow_transfer_to_peers=True,
@@ -420,8 +440,8 @@ def build_root_agent(
 ) -> SequentialAgent:
     perception = ParallelAgent(
         name="PerceptionStage",
-        description="Runs violation detection and plate reading concurrently.",
-        sub_agents=[build_detector_agent(location), build_plate_agent(location)],
+        description="Runs fraud-pattern classification and attribution concurrently.",
+        sub_agents=[build_signal_agent(location), build_attribution_agent(location)],
     )
 
     router = VerdictRouter(
@@ -442,7 +462,9 @@ def build_root_agent(
         ),
         sub_agents=[
             perception,
-            MemoryAgent(name="MemoryAgent", description="Duplicate check + MV Act RAG."),
+            MemoryAgent(
+                name="MemoryAgent", description="Duplicate sweep + fraud-rulebook RAG."
+            ),
             build_auditor_agent(auditor_model, location),
             router,
         ],
@@ -485,27 +507,27 @@ def describe_architecture() -> dict:
                 "name": "IngestAgent",
                 "type": "FunctionTool",
                 "model": None,
-                "role": "Samples frames across the event window and attaches metadata.",
+                "role": "Parses the alert into the flagged transaction plus account history.",
             },
             {
                 "name": "PerceptionStage",
                 "type": "ParallelAgent",
                 "model": None,
-                "role": "Detection and plate reading run concurrently.",
+                "role": "Pattern classification and attribution run concurrently.",
                 "children": [
                     {
-                        "name": "DetectorAgent",
+                        "name": "SignalAgent",
                         "type": "LlmAgent",
                         "model": settings.detector_model,
-                        "output_schema": "Detection",
-                        "role": "Classifies the violation visible in the frames.",
+                        "output_schema": "RiskSignal",
+                        "role": "Classifies the fraud pattern present in the ledger.",
                     },
                     {
-                        "name": "PlateAgent",
+                        "name": "AttributionAgent",
                         "type": "LlmAgent",
                         "model": settings.plate_model,
-                        "output_schema": "PlateRead",
-                        "role": "Reads the plate with per-character confidence.",
+                        "output_schema": "AttributionRead",
+                        "role": "Scores whether this is attributable to a non-customer.",
                     },
                 ],
             },
@@ -513,7 +535,7 @@ def describe_architecture() -> dict:
                 "name": "MemoryAgent",
                 "type": "BaseAgent",
                 "model": None,
-                "role": "Qdrant near-duplicate sweep and MV Act retrieval.",
+                "role": "Near-duplicate alert sweep and fraud-rulebook retrieval.",
             },
             {
                 "name": "AuditorAgent",
@@ -533,7 +555,7 @@ def describe_architecture() -> dict:
                         "name": "EvidenceAgent",
                         "type": "LlmAgent",
                         "model": settings.detector_model,
-                        "role": "Assembles the evidence packet and drafts the challan.",
+                        "role": "Assembles the case file and drafts the customer notice.",
                     },
                     {
                         "name": "HumanQueueAgent",
@@ -545,7 +567,7 @@ def describe_architecture() -> dict:
                         "name": "RejectAgent",
                         "type": "BaseAgent",
                         "model": None,
-                        "role": "Drops the event; the decision is still ledgered.",
+                        "role": "Dismisses the alert; the decision is still ledgered.",
                     },
                 ],
             },
@@ -567,7 +589,7 @@ def describe_architecture() -> dict:
                 "name": "ReAuditAgent",
                 "type": "LlmAgent",
                 "model": settings.auditor_model,
-                "role": "Re-runs the audit against the ledger record when a citizen disputes.",
+                "role": "Re-runs the audit against the ledger record when a customer disputes.",
             },
         ],
         "adk_features": [
@@ -576,7 +598,7 @@ def describe_architecture() -> dict:
             "before_model_callback -> Enkrypt PII scrub",
             "after_agent_callback -> ledger append + bias screen",
             "Session state hand-off between agents",
-            "FunctionTool -> mock VAHAN lookup + MV Act retrieval",
+            "FunctionTool -> mock account/merchant lookup + rulebook retrieval",
         ],
     }
 

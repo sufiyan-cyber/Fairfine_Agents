@@ -23,7 +23,7 @@ from typing import Any
 from ..config import settings
 from ..retry import with_retry_sync
 from ..schemas import DuplicateCheck, RuleCitation
-from . import mv_act
+from . import fraud_rules
 
 _EMBED_DIM = 256
 _lock = threading.RLock()
@@ -222,7 +222,7 @@ class SemanticMemory:
         self._qdrant = client
 
     def _index_rules(self) -> None:
-        docs = mv_act.corpus_documents()
+        docs = fraud_rules.corpus_documents()
         vectors = list(zip(embed_many([d["text"] for d in docs]), docs))
         self._local_rules = vectors
         self._build_lexical_index(docs)
@@ -328,7 +328,7 @@ class SemanticMemory:
             for idx, (vec, doc) in enumerate(self._local_rules):
                 meta = doc["metadata"]
                 score = 0.30 * cosine(query_vec, vec) + 0.70 * self._lexical_score(query, idx)
-                if any(v in query for v in meta.get("violations", []) if v != "none"):
+                if any(v in query for v in meta.get("fraud_types", []) if v != "none"):
                     score += 0.5
                 scored.append((score, meta))
             scored.sort(key=lambda x: x[0], reverse=True)
@@ -346,9 +346,9 @@ class SemanticMemory:
             if meta
         ]
 
-    def rule_for_violation(self, violation_type: str) -> RuleCitation | None:
-        """Statute lookup is deterministic; RAG supplements it with context."""
-        entry = mv_act.section_for_violation(violation_type)
+    def rule_for_fraud_type(self, fraud_type: str) -> RuleCitation | None:
+        """Rulebook lookup is deterministic; RAG supplements it with context."""
+        entry = fraud_rules.section_for_fraud_type(fraud_type)
         if not entry:
             return None
         return RuleCitation(
@@ -393,16 +393,22 @@ class SemanticMemory:
             )
 
     def remember_event(
-        self, challan_id: str, plate: str, location: str, violation_type: str, ts: str, description: str
+        self,
+        challan_id: str,
+        account_ref: str,
+        merchant: str,
+        fraud_type: str,
+        ts: str,
+        description: str,
     ) -> None:
         self.ensure_ready()
-        text = f"{violation_type} {plate} {location} {description}"
+        text = f"{fraud_type} {account_ref} {merchant} {description}"
         vec = embed(text)
         payload = {
             "challan_id": challan_id,
-            "plate": plate,
-            "location": location,
-            "violation_type": violation_type,
+            "account_ref": account_ref,
+            "merchant": merchant,
+            "fraud_type": fraud_type,
             "ts": ts,
             "description": description,
         }
@@ -425,27 +431,28 @@ class SemanticMemory:
 
     def check_duplicate(
         self,
-        plate: str,
-        location: str,
-        violation_type: str,
+        account_ref: str,
+        merchant: str,
+        fraud_type: str,
         ts: str,
         description: str,
         candidates: list[dict],
     ) -> DuplicateCheck:
-        """Flag a re-submission of an event we already ruled on.
+        """Flag a re-submission of an alert we already ruled on.
 
-        `candidates` are same-plate rows pulled from SQLite. A duplicate must
-        satisfy all three: same plate, same location, and inside the configured
-        time window. Semantic similarity is reported for transparency but is
-        not on its own sufficient.
+        `candidates` are same-account rows pulled from SQLite. A duplicate must
+        satisfy all three: same account, same merchant, and inside the
+        configured time window. Semantic similarity is reported for
+        transparency but is not on its own sufficient.
         """
         self.ensure_ready()
-        if not plate or plate.upper() in {"UNKNOWN", "UNREADABLE"}:
+        if not account_ref or account_ref.upper() in {"UNKNOWN", "UNRESOLVED"}:
             return DuplicateCheck(
-                is_duplicate=False, note="Plate unreadable — duplicate check not meaningful."
+                is_duplicate=False,
+                note="Account unresolved — duplicate check not meaningful.",
             )
 
-        event_vec = embed(f"{violation_type} {plate} {location} {description}")
+        event_vec = embed(f"{fraud_type} {account_ref} {merchant} {description}")
         try:
             event_time = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except (ValueError, AttributeError):
@@ -453,7 +460,7 @@ class SemanticMemory:
 
         best: tuple[float, dict, float] | None = None
         for cand in candidates:
-            if cand.get("plate", "").upper() != plate.upper():
+            if cand.get("account_ref", "").upper() != account_ref.upper():
                 continue
             try:
                 cand_time = datetime.fromisoformat(
@@ -466,12 +473,12 @@ class SemanticMemory:
             delta = abs((event_time - cand_time).total_seconds())
             if delta > settings.duplicate_window_seconds:
                 continue
-            if _normalise_location(cand.get("location", "")) != _normalise_location(location):
+            if _normalise_merchant(cand.get("merchant", "")) != _normalise_merchant(merchant):
                 continue
 
             cand_vec = embed(
-                f"{cand.get('violation_type','')} {cand.get('plate','')} "
-                f"{cand.get('location','')} {cand.get('description','')}"
+                f"{cand.get('fraud_type','')} {cand.get('account_ref','')} "
+                f"{cand.get('merchant','')} {cand.get('description','')}"
             )
             sim = cosine(event_vec, cand_vec)
             if best is None or sim > best[0]:
@@ -481,14 +488,14 @@ class SemanticMemory:
             return DuplicateCheck(
                 is_duplicate=False,
                 note=(
-                    f"No prior event for {plate} at this location within "
+                    f"No prior alert for {account_ref} at this merchant within "
                     f"{settings.duplicate_window_seconds}s."
                 ),
             )
 
         sim, cand, delta = best
-        same_violation = cand.get("violation_type") == violation_type
-        is_dup = same_violation and sim >= 0.80
+        same_pattern = cand.get("fraud_type") == fraud_type
+        is_dup = same_pattern and sim >= 0.80
         return DuplicateCheck(
             is_duplicate=is_dup,
             similarity=round(sim, 3),
@@ -496,16 +503,16 @@ class SemanticMemory:
             matched_ts=cand.get("event_ts"),
             seconds_apart=round(delta, 1),
             note=(
-                f"Near-identical event {cand.get('challan_id')} logged {delta:.0f}s earlier "
-                f"at the same location for the same plate."
+                f"Near-identical alert {cand.get('challan_id')} logged {delta:.0f}s earlier "
+                f"at the same merchant for the same account."
                 if is_dup
-                else f"Prior event {delta:.0f}s earlier but different violation or low similarity."
+                else f"Prior alert {delta:.0f}s earlier but different pattern or low similarity."
             ),
         )
 
 
-def _normalise_location(location: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", (location or "").lower())
+def _normalise_merchant(merchant: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (merchant or "").lower())
 
 
 memory = SemanticMemory()

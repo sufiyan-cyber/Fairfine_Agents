@@ -2,6 +2,12 @@
 
 These are the `output_schema` targets on the ADK LlmAgents — no agent in the
 pipeline is allowed to answer in free text.
+
+A note on the verdict vocabulary. `ISSUE` / `ESCALATE` / `REJECT` are the
+decision the auditor reaches about the monitoring system's fraud alert:
+uphold it and act against the account, send it to a human, or dismiss it and
+let the transaction stand. The action layer renders these as BLOCK / REVIEW /
+ALLOW, which is how a fraud-operations analyst says the same three things.
 """
 
 from __future__ import annotations
@@ -10,13 +16,13 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-ViolationType = Literal[
-    "red_light_jump",
-    "no_helmet",
-    "wrong_side",
-    "triple_riding",
-    "no_seatbelt",
-    "phone_use",
+FraudType = Literal[
+    "card_testing",
+    "account_takeover",
+    "stolen_card_use",
+    "impossible_travel",
+    "merchant_anomaly",
+    "structuring",
     "none",
 ]
 
@@ -26,57 +32,84 @@ Language = Literal["en", "hi", "kn", "ta"]
 
 
 # --------------------------------------------------------------------------- #
-# PRD §5 core schemas
+# Core schemas
 # --------------------------------------------------------------------------- #
-class Frame(BaseModel):
-    path: str
-    ts: str = Field(description="ISO-8601 capture time")
-    camera_id: str
-    location: str = Field(description="'lat,lng' or a named junction")
+class TxnEvent(BaseModel):
+    """One transaction in the case file — flagged or surrounding history."""
+
+    event_id: str
+    ts: str = Field(description="ISO-8601 authorisation time")
+    amount: float
+    currency: str = "INR"
+    merchant: str = ""
+    category: str = Field(default="uncategorised", description="Merchant category")
+    channel: str = Field(default="ecom", description="card_present | ecom | atm | transfer")
+    device_id: str = ""
+    city: str = ""
+    country: str = "IN"
+    status: str = "approved"
+    is_flagged: bool = False
 
 
-class Detection(BaseModel):
-    violation_type: ViolationType
-    region_description: str = Field(
-        description="Where in the frame the violation appears, in plain words"
+class RiskSignal(BaseModel):
+    """What fraud pattern the perception stage believes it is looking at."""
+
+    fraud_type: FraudType
+    evidence_summary: str = Field(
+        description="Which transactions support the call, and what makes them suspicious"
     )
     raw_confidence: float = Field(ge=0.0, le=1.0)
-    frame_ref: str = Field(description="Which frame(s) evidence the call")
+    event_ref: str = Field(description="Which event(s) evidence the call")
 
 
-class PlateRead(BaseModel):
-    plate: str
-    per_char_confidence: list[float] = Field(default_factory=list)
-    min_confidence: float = Field(ge=0.0, le=1.0)
-    occluded: bool = False
+class AttributionRead(BaseModel):
+    """Can this be attributed to someone other than the genuine customer?
+
+    The direct analogue of a plate read in automated enforcement: the pattern
+    may be real while the attribution is not, and acting on an unreliable
+    attribution is how an innocent customer loses access to their money.
+    """
+
+    account_ref: str
+    indicators: list[str] = Field(
+        default_factory=list, description="Behavioural indicators actually checked"
+    )
+    per_indicator_confidence: list[float] = Field(default_factory=list)
+    min_confidence: float = Field(
+        ge=0.0, le=1.0, description="Weakest indicator — governs whether we may act"
+    )
+    matches_known_behaviour: bool = Field(
+        default=False, description="True when this looks like the customer's own pattern"
+    )
+    ambiguous: bool = False
 
 
 class VerdictChecks(BaseModel):
-    visually_confirmed: bool
-    plate_reliable: bool
+    pattern_confirmed: bool
+    attribution_reliable: bool
     duplicate: bool
     rule_applies: bool
-    environment_ok: bool
+    context_ok: bool
 
 
 class Verdict(BaseModel):
     verdict: VerdictType
     trust_score: float = Field(ge=0.0, le=1.0, description="Calibrated, not raw")
-    reasoning: str = Field(description="Citizen-facing plain English")
+    reasoning: str = Field(description="Customer-facing plain English")
     checks: VerdictChecks
 
 
 class EvidencePacket(BaseModel):
     challan_id: str
-    plate: str
-    owner_masked: str
-    violation_type: str
-    location: str
+    account_ref: str
+    customer_masked: str
+    fraud_type: str
+    merchant: str
     ts: str
     trust_score: float
     reasoning: str
     rule_citation: str
-    frames: list[str] = Field(default_factory=list)
+    events: list[str] = Field(default_factory=list)
     ledger_hash: str
 
 
@@ -92,7 +125,7 @@ class LedgerRecord(BaseModel):
 # Supporting contracts
 # --------------------------------------------------------------------------- #
 class DuplicateCheck(BaseModel):
-    """Result of the Qdrant near-duplicate sweep."""
+    """Result of the semantic near-duplicate sweep over recent alerts."""
 
     is_duplicate: bool = False
     similarity: float = 0.0
@@ -111,7 +144,7 @@ class RuleCitation(BaseModel):
 
 
 class AuditTrace(BaseModel):
-    """One row in the live agent trace shown in the officer console."""
+    """One row in the live agent trace shown in the analyst console."""
 
     agent: str
     status: Literal["pending", "running", "done", "skipped", "error"]
@@ -124,26 +157,26 @@ class AuditTrace(BaseModel):
 
 
 class NaiveComparison(BaseModel):
-    """What a confidence-threshold-only system would have done. Demo drama."""
+    """What a score-threshold-only engine would have done. Demo drama."""
 
     would_issue: bool
     basis: str
-    fine_amount: int = 0
+    amount_held: float = 0.0
 
 
 class AuditResult(BaseModel):
     challan_id: str
     mode: str
     verdict: Verdict
-    detection: Detection
-    plate: PlateRead
-    frames: list[Frame] = Field(default_factory=list)
+    signal: RiskSignal
+    attribution: AttributionRead
+    events: list[TxnEvent] = Field(default_factory=list)
     duplicate: DuplicateCheck
     rule: RuleCitation | None = None
     evidence: EvidencePacket | None = None
     ledger_id: str = ""
     ledger_hash: str = ""
-    frames_sha256: str = ""
+    events_sha256: str = ""
     trace: list[AuditTrace] = Field(default_factory=list)
     naive: NaiveComparison | None = None
     created_at: str = ""
@@ -156,20 +189,20 @@ class CitizenView(BaseModel):
     explanation: str
     what_this_means: str
     your_options: list[str] = Field(default_factory=list)
-    violation_label: str
+    fraud_label: str
     trust_score: float
     verdict: VerdictType
-    plate: str
-    owner_masked: str
-    location: str
+    account_ref: str
+    customer_masked: str
+    merchant: str
     ts: str
     rule_citation: str
     rule_text: str = ""
     auditor_reasoning: str
     checks: VerdictChecks
-    frames: list[str] = Field(default_factory=list)
+    events: list[TxnEvent] = Field(default_factory=list)
     ledger_hash: str
-    fine_amount: int = 0
+    amount_held: float = 0.0
     disputable: bool = True
     dispute_status: str | None = None
 
@@ -180,7 +213,7 @@ class DisputeRequest(BaseModel):
 
 
 class ReviewDecision(BaseModel):
-    """An officer closing an escalated case.
+    """An analyst closing an escalated case.
 
     `note` is required and has a floor, because a decision with no stated
     reason is the failure mode this queue exists to prevent.
@@ -230,7 +263,7 @@ class BiasSlice(BaseModel):
     rejected: int
     escalated: int
     false_positive_rate: float = Field(
-        description="Share of AI-flagged events the auditor stopped before a fine"
+        description="Share of alerts the auditor stopped before the account was blocked"
     )
     avg_trust: float = 0.0
 
@@ -241,10 +274,11 @@ class BiasDashboard(BaseModel):
     issued: int
     rejected: int
     escalated: int
-    wrongful_fines_prevented: int
+    wrongful_blocks_prevented: int
     prevention_rate: float
-    by_area: list[BiasSlice] = Field(default_factory=list)
-    by_vehicle_type: list[BiasSlice] = Field(default_factory=list)
-    by_violation_type: list[BiasSlice] = Field(default_factory=list)
+    amount_protected: float = 0.0
+    by_region: list[BiasSlice] = Field(default_factory=list)
+    by_segment: list[BiasSlice] = Field(default_factory=list)
+    by_fraud_type: list[BiasSlice] = Field(default_factory=list)
     by_hour: list[BiasSlice] = Field(default_factory=list)
     over_time: list[dict] = Field(default_factory=list)
