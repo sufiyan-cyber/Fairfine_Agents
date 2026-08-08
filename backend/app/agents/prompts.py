@@ -62,12 +62,25 @@ non-customer actor:
 - ~0.75 suggestive but with a plausible innocent reading
 - <0.5  you are inferring it from the alert rather than from the data
 
+What belongs in `indicators` — read this carefully, it governs the outcome:
+- List ONLY indicators strong enough that you would act on the account if that
+  indicator held on its own merits. These are load-bearing findings, not an
+  inventory of everything you noticed.
+- A weak or merely corroborating detail — a channel shift, a nearby city, a
+  slightly unusual hour — does NOT belong in the list. Describe it in your
+  reasoning if it matters, but listing it as an indicator vetoes the case,
+  because the minimum governs. Being thorough must not be punished.
+- If an indicator is real but you would not act on it alone, leave it out.
+- If NO indicator meets that bar, return the weak ones with their honest low
+  scores and let the case escalate. That is the correct outcome, not a failure.
+
 Critical honesty requirements:
 - Do NOT manufacture indicators to justify the alert. If the ledger only
   supports two indicators, return two.
 - `min_confidence` must equal the minimum of `per_indicator_confidence`. One
   weak indicator makes the whole attribution unreliable — that is the point.
-  We do not act on a chain that has a weak link.
+  We do not act on a chain that has a weak link, which is exactly why the list
+  must contain only links you are willing to stand behind.
 - Set `matches_known_behaviour` to true when the flagged transaction resembles
   something already present in this account's own history — same merchant, same
   category, similar amount, same device. This single fact is the most common
