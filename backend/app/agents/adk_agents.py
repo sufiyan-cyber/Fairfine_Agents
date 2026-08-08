@@ -118,13 +118,35 @@ def _as_dict(value) -> dict:
     return {}
 
 
+def _agent_model(model_name: str, location: str | None = None):
+    """The `model` value for an LlmAgent, optionally pinned to a Vertex region.
+
+    A plain string lets ADK build its Gemini client from the environment, which
+    is the normal path. Pinning a *different* region needs an explicit `Gemini`
+    with `client_kwargs`, because the env-derived client is process-wide state
+    that can't be varied per tree.
+    """
+    if not location or not settings.live_vertex:
+        return model_name
+    from google.adk.models.google_llm import Gemini
+
+    return Gemini(
+        model=model_name,
+        client_kwargs={
+            "vertexai": True,
+            "project": settings.google_cloud_project,
+            "location": location,
+        },
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Perception stage
 # --------------------------------------------------------------------------- #
-def build_detector_agent() -> LlmAgent:
+def build_detector_agent(location: str | None = None) -> LlmAgent:
     return LlmAgent(
         name="DetectorAgent",
-        model=settings.detector_model,
+        model=_agent_model(settings.detector_model, location),
         description="Classifies the traffic violation visible in the sampled frames.",
         instruction=prompts.DETECTOR_PROMPT,
         output_schema=Detection,
@@ -135,10 +157,10 @@ def build_detector_agent() -> LlmAgent:
     )
 
 
-def build_plate_agent() -> LlmAgent:
+def build_plate_agent(location: str | None = None) -> LlmAgent:
     return LlmAgent(
         name="PlateAgent",
-        model=settings.plate_model,
+        model=_agent_model(settings.plate_model, location),
         description="Reads the registration plate with per-character confidence.",
         instruction=prompts.PLATE_PROMPT,
         output_schema=PlateRead,
@@ -238,10 +260,12 @@ def _auditor_instruction(ctx: ReadonlyContext) -> str:
     return f"{base}\n\n{context}"
 
 
-def build_auditor_agent(model: str | None = None) -> LlmAgent:
+def build_auditor_agent(
+    model: str | None = None, location: str | None = None
+) -> LlmAgent:
     return LlmAgent(
         name="AuditorAgent",
-        model=model or settings.auditor_model,
+        model=_agent_model(model or settings.auditor_model, location),
         description=(
             "Adversarially reviews the detection and plate read, and returns a "
             "calibrated trust score with an ISSUE / REJECT / ESCALATE verdict."
@@ -318,7 +342,7 @@ class RejectAgent(BaseAgent):
         )
 
 
-def build_evidence_agent() -> LlmAgent:
+def build_evidence_agent(location: str | None = None) -> LlmAgent:
     """ISSUE branch — assembles the evidence packet and drafts the challan.
 
     Holds the mock VAHAN lookup as an ADK tool. Owner identity is withheld from
@@ -351,7 +375,7 @@ def build_evidence_agent() -> LlmAgent:
 
     return LlmAgent(
         name="EvidenceAgent",
-        model=settings.detector_model,
+        model=_agent_model(settings.detector_model, location),
         description="Assembles the evidence packet and drafts the challan notice.",
         instruction=prompts.EVIDENCE_PROMPT,
         tools=[registry_lookup, rule_text],
@@ -391,18 +415,20 @@ class VerdictRouter(BaseAgent):
 # --------------------------------------------------------------------------- #
 # Root
 # --------------------------------------------------------------------------- #
-def build_root_agent(auditor_model: str | None = None) -> SequentialAgent:
+def build_root_agent(
+    auditor_model: str | None = None, location: str | None = None
+) -> SequentialAgent:
     perception = ParallelAgent(
         name="PerceptionStage",
         description="Runs violation detection and plate reading concurrently.",
-        sub_agents=[build_detector_agent(), build_plate_agent()],
+        sub_agents=[build_detector_agent(location), build_plate_agent(location)],
     )
 
     router = VerdictRouter(
         name="VerdictRouter",
         description="Routes ISSUE / ESCALATE / REJECT to the correct branch.",
         sub_agents=[
-            build_evidence_agent(),
+            build_evidence_agent(location),
             HumanQueueAgent(name="HumanQueueAgent", description="Human review queue."),
             RejectAgent(name="RejectAgent", description="Drops the event, still ledgered."),
         ],
@@ -417,7 +443,7 @@ def build_root_agent(auditor_model: str | None = None) -> SequentialAgent:
         sub_agents=[
             perception,
             MemoryAgent(name="MemoryAgent", description="Duplicate check + MV Act RAG."),
-            build_auditor_agent(auditor_model),
+            build_auditor_agent(auditor_model, location),
             router,
         ],
         after_agent_callback=ledger_callback,
@@ -427,20 +453,22 @@ def build_root_agent(auditor_model: str | None = None) -> SequentialAgent:
 # `adk web` / `adk run` entry point.
 root_agent = None
 
-# One cached tree per auditor model. Keyed rather than single because the
-# fallback path needs a second tree: ADK fixes an LlmAgent's model at
-# construction, so serving a different model means a different tree — and
-# building one per audit leaks the Gemini connection pools this cache exists to
-# avoid in the first place.
-_root_agents: dict[str, SequentialAgent] = {}
+# One cached tree per (auditor model, region). Keyed rather than single because
+# the fallback paths need their own trees: ADK fixes an LlmAgent's model — and,
+# via `client_kwargs`, its region — at construction, so serving a different
+# model or region means a different tree. Building one per audit leaks the
+# Gemini connection pools this cache exists to avoid in the first place.
+_root_agents: dict[tuple[str, str], SequentialAgent] = {}
 
 
-def get_root_agent(auditor_model: str | None = None) -> SequentialAgent:
+def get_root_agent(
+    auditor_model: str | None = None, location: str | None = None
+) -> SequentialAgent:
     global root_agent
-    key = auditor_model or settings.auditor_model
+    key = (auditor_model or settings.auditor_model, location or "")
     tree = _root_agents.get(key)
     if tree is None:
-        tree = _root_agents[key] = build_root_agent(key)
+        tree = _root_agents[key] = build_root_agent(*key)
     if root_agent is None:
         root_agent = tree  # `adk web` / `adk run` entry point
     return tree

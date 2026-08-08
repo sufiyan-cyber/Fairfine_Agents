@@ -131,34 +131,63 @@ async def _run_adk(
     so a retry starts from the same clean initial state rather than inheriting
     the half-populated state of the attempt that failed.
 
-    If the auditor's model stays exhausted after those retries, the audit is
-    re-run on the fallback model rather than failed. Vertex serves the larger
-    models from a shared capacity pool, so a 429 there says the pool is busy,
-    not that anything is wrong with the request — and the smaller model applies
-    the same prompt, the same five vetoes and the same thresholds. A shallower
-    verdict is worth more than an error, and `capability_report` reports which
-    model actually answered.
+    If the model stays exhausted after those retries, the audit is re-run down
+    a fallback ladder rather than failed. A 429 says a capacity pool is busy,
+    not that anything is wrong with the request, and the pools are separate
+    along two axes: *regions* don't share capacity (measured 2026-08-07, the
+    `global` endpoint refused every frames-attached request while asia-south1,
+    us-central1 and europe-west4 all served the identical payload), and neither
+    do *models*. So the ladder tries the same model in the fallback region
+    before it downgrades the model at all: same verdict quality in a different
+    queue beats a shallower verdict. The prompt, the five vetoes and the
+    thresholds are identical on every rung.
     """
-    try:
-        return await with_retry(
-            lambda: _run_adk_once(frames, challan_id, operator_note, dispute_reason),
-            label=f"adk-tree[{settings.auditor_model}]",
-        )
-    except Exception as exc:  # noqa: BLE001 — re-raised below unless retryable
-        fallback = settings.auditor_fallback_model.strip()
-        if not fallback or fallback == settings.auditor_model or not is_retryable(exc):
-            raise
-        print(
-            f"[fallback] {settings.auditor_model} still exhausted after retries; "
-            f"re-running the audit on {fallback}",
-            flush=True,
-        )
-        return await with_retry(
-            lambda: _run_adk_once(
-                frames, challan_id, operator_note, dispute_reason, auditor_model=fallback
-            ),
-            label=f"adk-tree[{fallback}]",
-        )
+    primary_model = settings.auditor_model
+    fallback_model = settings.auditor_fallback_model.strip()
+    if fallback_model == primary_model:
+        fallback_model = ""
+    backup_region = ""
+    if settings.live_vertex:
+        backup_region = settings.vertex_fallback_location.strip()
+        if backup_region == settings.google_cloud_location:
+            backup_region = ""
+
+    rungs: list[tuple[str, str | None]] = [(primary_model, None)]
+    if backup_region:
+        rungs.append((primary_model, backup_region))
+    if fallback_model:
+        rungs.append((fallback_model, None))
+        if backup_region:
+            rungs.append((fallback_model, backup_region))
+
+    last_exc: Exception | None = None
+    for index, (model, location) in enumerate(rungs):
+        region = location or settings.google_cloud_location
+        if index:
+            print(
+                f"[fallback] still exhausted after retries; "
+                f"re-running the audit on {model} in {region}",
+                flush=True,
+            )
+        try:
+            return await with_retry(
+                lambda model=model, location=location: _run_adk_once(
+                    frames,
+                    challan_id,
+                    operator_note,
+                    dispute_reason,
+                    auditor_model=model,
+                    location=location,
+                ),
+                label=f"adk-tree[{model}@{region}]",
+            )
+        except Exception as exc:  # noqa: BLE001 — re-raised unless retryable
+            if not is_retryable(exc):
+                raise
+            last_exc = exc
+
+    assert last_exc is not None  # rungs is never empty
+    raise last_exc
 
 
 async def _run_adk_once(
@@ -167,6 +196,7 @@ async def _run_adk_once(
     operator_note: str,
     dispute_reason: str | None,
     auditor_model: str | None = None,
+    location: str | None = None,
 ) -> dict:
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
@@ -209,7 +239,7 @@ async def _run_adk_once(
     # exactly how `adk web`/`adk api_server` run.
     runner = Runner(
         app_name=app_name,
-        agent=get_root_agent(auditor_model),
+        agent=get_root_agent(auditor_model, location),
         session_service=session_service,
     )
 

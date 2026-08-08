@@ -35,9 +35,18 @@ class Settings(BaseSettings):
     # GEMINI_API_KEY; nothing else in the pipeline changes either way.
     use_vertex: bool = False
     google_cloud_project: str = ""
-    # `global` routes to whichever region has capacity, which is the safest
-    # default for a project that has never called Vertex before.
-    google_cloud_location: str = "global"
+    # A concrete region, not `global`. The global endpoint shed every
+    # multimodal (frames-attached) request from this project with 429
+    # "Resource exhausted" while serving text-only calls fine — measured
+    # 2026-08-07: identical 3-frame requests got 429 on `global` and 200 on
+    # asia-south1, us-central1 and europe-west4. Regional endpoints have their
+    # own capacity pools; asia-south1 is where the Cloud Run service runs.
+    google_cloud_location: str = "asia-south1"
+    # Tried when the primary region is still refusing the audit after retries.
+    # Regions have separate capacity pools, so a second region is a genuine
+    # second chance rather than another spin of the same wheel. Vertex-only;
+    # empty disables the hop.
+    vertex_fallback_location: str = "us-central1"
     # Force the deterministic simulator even when a Gemini key is present. Set
     # FORCE_SIMULATION=1 for a reliable, quota-free, controllable demo — a real
     # value that PowerShell handles cleanly, unlike blanking GEMINI_API_KEY.
